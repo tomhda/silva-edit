@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "SILVA EDIT",
+  "version": "1.1.0",
+  "description": "サイドパネルで動画を簡単にトリミング・書き出し（テーマ切替・再生速度対応）。",
+  "permissions": ["sidePanel"],
+  "action": {
+    "default_title": "SILVA EDIT",
+    "default_icon": {
+      "16": "images/icon-16.png",
+      "48": "images/icon-48.png",
+      "128": "images/icon-128.png"
+    }
+  },
+  "icons": {
+    "16": "images/icon-16.png",
+    "48": "images/icon-48.png",
+    "128": "images/icon-128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'"
+  }
+}

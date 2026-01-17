@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>シルバエディット</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <input id="fileInput" type="file" accept="video/*" hidden />
+
+    <section class="info compact">
+      <div class="info-card">
+        <div class="info-label">ファイル</div>
+        <div id="fileName" class="info-value">未選択</div>
+      </div>
+      <div class="info-card">
+        <div class="info-label">再生時間</div>
+        <div id="duration" class="info-value">--</div>
+      </div>
+      <div class="info-card">
+        <div class="info-label">元解像度</div>
+        <div id="sourceSize" class="info-value">--</div>
+      </div>
+    </section>
+
+    <section id="dropzone" class="dropzone">
+      <div class="drop-content">
+        <div class="drop-title">ここに動画ファイルをドロップ</div>
+        <div class="drop-subtitle">またはクリックして選択</div>
+        <div class="drop-formats">MP4 / WebM / MOV / Ogg</div>
+      </div>
+    </section>
+
+    <section class="preview" id="previewSection">
+      <div class="video-wrap">
+        <video id="video" class="video" controls preload="auto"></video>
+        <button
+          id="exportFrame"
+          class="frame-button"
+          data-label="現在フレームを保存"
+          aria-label="現在フレームを保存"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M5 7h3l1.5-2h5L16 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2zm7 2.5A3.5 3.5 0 1 0 12 16a3.5 3.5 0 0 0 0-7zm0 2a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"
+            />
+          </svg>
+        </button>
+      </div>
+      <div class="canvas-wrap">
+        <div class="canvas-label">クロップ範囲</div>
+        <button
+          id="exportFrameCrop"
+          class="crop-save"
+          data-label="切り取ったフレームを保存"
+          aria-label="切り取ったフレームを保存"
+          type="button"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M5 7h3l1.5-2h5L16 7h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2zm7 2.5A3.5 3.5 0 1 0 12 16a3.5 3.5 0 0 0 0-7zm0 2a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3z"
+            />
+          </svg>
+        </button>
+        <div class="canvas-stage" id="previewStage">
+          <canvas id="preview"></canvas>
+          <div id="cropBox" class="crop-box" aria-hidden="true">
+            <div id="cropHandleTL" class="crop-handle" data-handle="tl"></div>
+            <div id="cropHandle" class="crop-handle" data-handle="br"></div>
+          </div>
+        </div>
+        <div id="cropSize" class="crop-size">--</div>
+        <div class="canvas-hint">ドラッグで移動、角のハンドルでサイズ調整</div>
+      </div>
+    </section>
+
+    <section class="controls">
+      <div class="control-block trim">
+        <div class="block-title">長さトリミング</div>
+        <div class="row split">
+          <div class="field">
+            <label for="startTime">開始（秒）</label>
+            <input id="startTime" type="number" min="0" step="0.1" />
+            <button id="setStart" class="ghost small">現在位置</button>
+          </div>
+          <div class="field">
+            <label for="endTime">終了（秒）</label>
+            <input id="endTime" type="number" min="0" step="0.1" />
+            <button id="setEnd" class="ghost small">現在位置</button>
+          </div>
+        </div>
+        <div class="row speed-row">
+          <label for="playbackRate">再生速度</label>
+          <input id="playbackRate" type="number" min="0.25" max="4" step="0.05" value="1" />
+          <span class="rate-unit">x</span>
+        </div>
+      </div>
+
+      <div class="control-block crop">
+        <div class="block-title">解像度クロップ</div>
+        <div class="row split">
+          <div class="field">
+            <label for="outWidth">幅</label>
+            <input id="outWidth" type="number" min="1" step="1" />
+          </div>
+          <div class="field">
+            <label for="outHeight">高さ</label>
+            <input id="outHeight" type="number" min="1" step="1" />
+          </div>
+        </div>
+        <button id="useSource" class="ghost small block-action">元解像度</button>
+        <div class="hint">ドラッグで範囲調整。数値入力でも指定できます。</div>
+      </div>
+    </section>
+
+    <section class="actions">
+      <button id="exportVideo" class="primary">編集動画書き出し</button>
+      <button id="exportAudio" class="secondary">音声のみ保存（MP3）</button>
+    </section>
+
+    <footer class="footer">
+      <div class="footer-left">
+        <img class="footer-icon" src="icon.svg" alt="SILVA EDIT" />
+        <span class="footer-title">SILVA EDIT</span>
+        <div class="mode-toggle" role="group" aria-label="表示モード">
+          <button class="mode-btn" type="button" data-mode="yuru" aria-pressed="true">
+            ゆるシルバ
+          </button>
+          <button class="mode-btn" type="button" data-mode="kiri" aria-pressed="false">
+            キリシルバ
+          </button>
+        </div>
+      </div>
+      <div class="log footer-status" id="log"></div>
+      <button
+        id="clearVideo"
+        class="clear-video"
+        data-label="動画をクリア"
+        aria-label="動画をクリア"
+        type="button"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path
+            d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v9h-2V9zm4 0h2v9h-2V9zM6 7h12l-1 13a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L6 7z"
+          />
+        </svg>
+      </button>
+    </footer>
+
+    <script src="vendor/ffmpeg/ffmpeg.js"></script>
+    <script src="panel.js"></script>
+  </body>
+</html>

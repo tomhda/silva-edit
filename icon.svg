@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-label="シルバエディット">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#f7f1e7" />
+      <stop offset="100%" stop-color="#e8dcc8" />
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#bg)" />
+
+  <!-- Film strip holes (top) -->
+  <rect x="20" y="14" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+  <rect x="36" y="14" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+  <rect x="84" y="14" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+  <rect x="100" y="14" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+
+  <!-- Film strip holes (bottom) -->
+  <rect x="20" y="108" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+  <rect x="36" y="108" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+  <rect x="84" y="108" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+  <rect x="100" y="108" width="8" height="6" rx="1" fill="#2a2520" opacity="0.3" />
+
+  <!-- Silba-kun (Black English Cocker Spaniel) -->
+  <!-- Left ear -->
+  <ellipse cx="32" cy="70" rx="14" ry="28" fill="#1a1714" />
+  <ellipse cx="32" cy="72" rx="10" ry="22" fill="#2a2520" />
+
+  <!-- Right ear -->
+  <ellipse cx="96" cy="70" rx="14" ry="28" fill="#1a1714" />
+  <ellipse cx="96" cy="72" rx="10" ry="22" fill="#2a2520" />
+
+  <!-- Head -->
+  <ellipse cx="64" cy="58" rx="28" ry="26" fill="#1a1714" />
+
+  <!-- Snout -->
+  <ellipse cx="64" cy="72" rx="16" ry="12" fill="#2a2520" />
+
+  <!-- Nose -->
+  <ellipse cx="64" cy="68" rx="7" ry="5" fill="#0f0d0b" />
+  <ellipse cx="64" cy="67" rx="2" ry="1" fill="#4a4540" />
+
+  <!-- Eyes -->
+  <ellipse cx="52" cy="54" rx="6" ry="7" fill="#0f0d0b" />
+  <ellipse cx="76" cy="54" rx="6" ry="7" fill="#0f0d0b" />
+  <!-- Eye shine -->
+  <circle cx="54" cy="52" r="2" fill="#fff" opacity="0.8" />
+  <circle cx="78" cy="52" r="2" fill="#fff" opacity="0.8" />
+
+  <!-- Play button overlay (subtle) -->
+  <path d="M56 90 L56 102 L70 96 Z" fill="#d35f42" opacity="0.9" />
+</svg>
