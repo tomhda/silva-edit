@@ -26,6 +26,14 @@ const exportFrameCropBtn = document.getElementById('exportFrameCrop');
 const exportAudioBtn = document.getElementById('exportAudio');
 const logEl = document.getElementById('log');
 const playbackRateInput = document.getElementById('playbackRate');
+const audioQualitySelect = document.getElementById('audioQuality');
+const volumeInput = document.getElementById('volume');
+const volumeValue = document.getElementById('volumeValue');
+const rotateLeftBtn = document.getElementById('rotateLeft');
+const rotateRightBtn = document.getElementById('rotateRight');
+const flipHBtn = document.getElementById('flipH');
+const flipVBtn = document.getElementById('flipV');
+const transformState = document.getElementById('transformState');
 const modeButtons = document.querySelectorAll('.mode-btn');
 
 // State
@@ -33,9 +41,16 @@ const state = {
   objectUrl: null,
   file: null,
   fileName: null,
+  mediaType: null,
   duration: 0,
   renderHandle: null,
   playbackRate: 1,
+  volume: 1,
+  transform: {
+    rotation: 0,
+    flipH: false,
+    flipV: false,
+  },
   crop: {
     x: 0,
     y: 0,
@@ -54,6 +69,19 @@ const ffmpegState = {
 const DEFAULT_PLAYBACK_RATE = 1;
 const MIN_PLAYBACK_RATE = 0.25;
 const MAX_PLAYBACK_RATE = 4;
+const DEFAULT_VOLUME = 1;
+const MIN_VOLUME = 0;
+const MAX_VOLUME = 2;
+const MEDIA_VIDEO = 'video';
+const MEDIA_AUDIO = 'audio';
+const DEFAULT_AUDIO_QUALITY = 'high';
+const AUDIO_BITRATES = {
+  high: '320k',
+  medium: '192k',
+};
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac', 'opus']);
+const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'ogv', 'mkv']);
+const ROTATION_STEP = 90;
 const MODE_KEY = 'silvaEditMode';
 const MODE_YURU = 'yuru';
 const MODE_KIRI = 'kiri';
@@ -86,20 +114,52 @@ function loadUIMode() {
   }
 }
 
-function setHasVideo(enabled) {
-  document.body.classList.toggle('has-video', enabled);
+function setMediaMode(type) {
+  const hasMedia = type === MEDIA_VIDEO || type === MEDIA_AUDIO;
+  state.mediaType = type;
+  document.body.classList.toggle('has-video', hasMedia);
+  document.body.classList.toggle('media-audio', type === MEDIA_AUDIO);
+  document.body.classList.toggle('media-video', type === MEDIA_VIDEO);
 }
 
 function setButtonsEnabled(enabled) {
-  exportVideoBtn.disabled = !enabled;
-  exportFrameBtn.disabled = !enabled;
+  const isAudio = state.mediaType === MEDIA_AUDIO;
+  exportVideoBtn.disabled = !enabled || isAudio;
+  exportFrameBtn.disabled = !enabled || isAudio;
   if (exportFrameCropBtn) {
-    exportFrameCropBtn.disabled = !enabled;
+    exportFrameCropBtn.disabled = !enabled || isAudio;
   }
   exportAudioBtn.disabled = !enabled;
   setStartBtn.disabled = !enabled;
   setEndBtn.disabled = !enabled;
-  useSourceBtn.disabled = !enabled;
+  useSourceBtn.disabled = !enabled || isAudio;
+  if (rotateLeftBtn) {
+    rotateLeftBtn.disabled = !enabled || isAudio;
+  }
+  if (rotateRightBtn) {
+    rotateRightBtn.disabled = !enabled || isAudio;
+  }
+  if (flipHBtn) {
+    flipHBtn.disabled = !enabled || isAudio;
+  }
+  if (flipVBtn) {
+    flipVBtn.disabled = !enabled || isAudio;
+  }
+  if (playbackRateInput) {
+    playbackRateInput.disabled = !enabled;
+  }
+  if (audioQualitySelect) {
+    audioQualitySelect.disabled = !enabled;
+  }
+  if (volumeInput) {
+    volumeInput.disabled = !enabled || isAudio;
+  }
+  if (outWidthInput) {
+    outWidthInput.disabled = !enabled || isAudio;
+  }
+  if (outHeightInput) {
+    outHeightInput.disabled = !enabled || isAudio;
+  }
 }
 
 function setProcessing(processing) {
@@ -142,6 +202,51 @@ function formatClipLabel(start, end) {
   return `${formatStamp(start)}-${formatStamp(end)}`;
 }
 
+function getMediaLabel(type = state.mediaType) {
+  return type === MEDIA_AUDIO ? '音声' : '動画';
+}
+
+function getFileExtension(fileName) {
+  if (!fileName) {
+    return '';
+  }
+  const parts = fileName.split('.');
+  if (parts.length < 2) {
+    return '';
+  }
+  return parts.pop().toLowerCase();
+}
+
+function detectMediaType(file) {
+  if (!file) {
+    return null;
+  }
+  if (file.type) {
+    if (file.type.startsWith('video/')) {
+      return MEDIA_VIDEO;
+    }
+    if (file.type.startsWith('audio/')) {
+      return MEDIA_AUDIO;
+    }
+  }
+  const ext = getFileExtension(file.name);
+  if (AUDIO_EXTENSIONS.has(ext)) {
+    return MEDIA_AUDIO;
+  }
+  if (VIDEO_EXTENSIONS.has(ext)) {
+    return MEDIA_VIDEO;
+  }
+  return null;
+}
+
+function getAudioBitrate() {
+  if (!audioQualitySelect) {
+    return AUDIO_BITRATES[DEFAULT_AUDIO_QUALITY];
+  }
+  const value = audioQualitySelect.value;
+  return AUDIO_BITRATES[value] || AUDIO_BITRATES[DEFAULT_AUDIO_QUALITY];
+}
+
 // Playback
 function sanitizePlaybackRate(value) {
   let rate = parseFloat(value);
@@ -160,6 +265,44 @@ function applyPlaybackRate(rate) {
   }
   video.playbackRate = rate;
   video.defaultPlaybackRate = rate;
+}
+
+function sanitizeVolume(value) {
+  let percent = parseFloat(value);
+  if (!Number.isFinite(percent)) {
+    percent = DEFAULT_VOLUME * 100;
+  }
+  const min = MIN_VOLUME * 100;
+  const max = MAX_VOLUME * 100;
+  percent = Math.min(Math.max(percent, min), max);
+  return Math.round(percent);
+}
+
+function applyVolume(percent) {
+  const clamped = sanitizeVolume(percent);
+  state.volume = clamped / 100;
+  if (volumeInput) {
+    volumeInput.value = String(clamped);
+  }
+  if (volumeValue) {
+    volumeValue.textContent = `${clamped}%`;
+  }
+  video.volume = Math.min(state.volume, 1);
+}
+
+function getVolume() {
+  return Math.min(Math.max(state.volume, MIN_VOLUME), MAX_VOLUME);
+}
+
+function getVolumeFilter() {
+  if (state.mediaType === MEDIA_AUDIO) {
+    return null;
+  }
+  const volume = getVolume();
+  if (Math.abs(volume - 1) < 0.001) {
+    return null;
+  }
+  return `volume=${volume.toFixed(2)}`;
 }
 
 // Trim timing
@@ -188,15 +331,26 @@ function sanitizeTimes() {
 // Crop geometry
 const MIN_CROP_SIZE = 32;
 
-function getVideoSize() {
+function getSourceSize() {
   return {
     width: video.videoWidth || 0,
     height: video.videoHeight || 0,
   };
 }
 
+function getDisplaySize() {
+  const { width, height } = getSourceSize();
+  if (!width || !height) {
+    return { width: 0, height: 0 };
+  }
+  if (state.transform.rotation % 180 === 0) {
+    return { width, height };
+  }
+  return { width: height, height: width };
+}
+
 function clampCropRect(rect) {
-  const { width: videoW, height: videoH } = getVideoSize();
+  const { width: videoW, height: videoH } = getDisplaySize();
   if (!videoW || !videoH) {
     return { x: 0, y: 0, width: 0, height: 0 };
   }
@@ -236,7 +390,7 @@ function updateCropBox() {
   if (!cropBox) {
     return;
   }
-  const { width: videoW, height: videoH } = getVideoSize();
+  const { width: videoW, height: videoH } = getDisplaySize();
   if (!videoW || !videoH) {
     cropBox.classList.add('hidden');
     return;
@@ -262,7 +416,7 @@ function setCropRect(rect) {
 }
 
 function setCropFull() {
-  const { width, height } = getVideoSize();
+  const { width, height } = getDisplaySize();
   setCropRect({ x: 0, y: 0, width, height });
 }
 
@@ -270,7 +424,7 @@ function updatePreviewLayout() {
   if (!previewSection) {
     return;
   }
-  const { width, height } = getVideoSize();
+  const { width, height } = getDisplaySize();
   if (!width || !height) {
     previewSection.classList.remove('side-by-side');
     return;
@@ -283,7 +437,7 @@ function applyCropSizeFromInputs() {
   if (!state.duration) {
     return;
   }
-  const { width: videoW, height: videoH } = getVideoSize();
+  const { width: videoW, height: videoH } = getDisplaySize();
   if (!videoW || !videoH) {
     return;
   }
@@ -307,19 +461,180 @@ function applyCropSizeFromInputs() {
   });
 }
 
+// Transform
+function normalizeRotation(degrees) {
+  const normalized = degrees % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function updateTransformUI() {
+  if (transformState) {
+    transformState.textContent = `回転 ${state.transform.rotation}°`;
+  }
+  if (flipHBtn) {
+    flipHBtn.classList.toggle('active', state.transform.flipH);
+    flipHBtn.setAttribute('aria-pressed', state.transform.flipH ? 'true' : 'false');
+  }
+  if (flipVBtn) {
+    flipVBtn.classList.toggle('active', state.transform.flipV);
+    flipVBtn.setAttribute('aria-pressed', state.transform.flipV ? 'true' : 'false');
+  }
+}
+
+function applyVideoTransform() {
+  const { rotation, flipH, flipV } = state.transform;
+  const transforms = [];
+  if (rotation) {
+    transforms.push(`rotate(${rotation}deg)`);
+  }
+  if (flipH) {
+    transforms.push('scaleX(-1)');
+  }
+  if (flipV) {
+    transforms.push('scaleY(-1)');
+  }
+  video.style.transform = transforms.length ? transforms.join(' ') : 'none';
+}
+
+function rotateCropRect(rect, prevW, prevH, delta) {
+  const amount = normalizeRotation(delta);
+  if (!prevW || !prevH) {
+    return rect;
+  }
+  if (amount === 90) {
+    return {
+      x: prevH - (rect.y + rect.height),
+      y: rect.x,
+      width: rect.height,
+      height: rect.width,
+    };
+  }
+  if (amount === 180) {
+    return {
+      x: prevW - (rect.x + rect.width),
+      y: prevH - (rect.y + rect.height),
+      width: rect.width,
+      height: rect.height,
+    };
+  }
+  if (amount === 270) {
+    return {
+      x: rect.y,
+      y: prevW - (rect.x + rect.width),
+      width: rect.height,
+      height: rect.width,
+    };
+  }
+  return rect;
+}
+
+function flipCropRect(rect, displayW, displayH, flipH, flipV) {
+  let next = { ...rect };
+  if (flipH) {
+    next.x = displayW - (next.x + next.width);
+  }
+  if (flipV) {
+    next.y = displayH - (next.y + next.height);
+  }
+  return next;
+}
+
+function rotateTransform(delta) {
+  const prevDisplay = getDisplaySize();
+  const rotated = rotateCropRect(state.crop, prevDisplay.width, prevDisplay.height, delta);
+  state.transform.rotation = normalizeRotation(state.transform.rotation + delta);
+  applyVideoTransform();
+  updatePreviewLayout();
+  if (state.duration) {
+    setCropRect(rotated);
+  } else {
+    updateCropBox();
+  }
+  updateTransformUI();
+  drawFrame();
+}
+
+function toggleFlip(axis) {
+  const display = getDisplaySize();
+  if (axis === 'h') {
+    state.transform.flipH = !state.transform.flipH;
+  } else {
+    state.transform.flipV = !state.transform.flipV;
+  }
+  applyVideoTransform();
+  if (state.duration) {
+    const flipped = flipCropRect(
+      state.crop,
+      display.width,
+      display.height,
+      axis === 'h',
+      axis === 'v'
+    );
+    setCropRect(flipped);
+  } else {
+    updateCropBox();
+  }
+  updateTransformUI();
+  drawFrame();
+}
+
+function drawTransformedSource(ctx, source, sourceW, sourceH, displayW, displayH) {
+  if (!sourceW || !sourceH) {
+    return false;
+  }
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.translate(displayW / 2, displayH / 2);
+  const rad = (state.transform.rotation * Math.PI) / 180;
+  ctx.rotate(rad);
+  const scaleX = state.transform.flipH ? -1 : 1;
+  const scaleY = state.transform.flipV ? -1 : 1;
+  ctx.scale(scaleX, scaleY);
+  ctx.drawImage(source, -sourceW / 2, -sourceH / 2, sourceW, sourceH);
+  ctx.restore();
+  return true;
+}
+
+function drawTransformedVideo(ctx, displayW, displayH) {
+  const { width: srcW, height: srcH } = getSourceSize();
+  return drawTransformedSource(ctx, video, srcW, srcH, displayW, displayH);
+}
+
+async function getFrameBitmap() {
+  if (!('createImageBitmap' in window)) {
+    return null;
+  }
+  try {
+    return await createImageBitmap(video, {
+      colorSpaceConversion: 'none',
+      premultiplyAlpha: 'none',
+    });
+  } catch (error) {
+    try {
+      return await createImageBitmap(video);
+    } catch (fallbackError) {
+      return null;
+    }
+  }
+}
+
 // Preview rendering
 function drawFrame() {
-  const { width: videoW, height: videoH } = getVideoSize();
-  if (!videoW || !videoH || video.readyState < 2) {
+  if (state.mediaType !== MEDIA_VIDEO) {
+    return;
+  }
+  const { width: displayW, height: displayH } = getDisplaySize();
+  if (!displayW || !displayH || video.readyState < 2) {
     return;
   }
   const ctx = preview.getContext('2d');
-  if (preview.width !== videoW || preview.height !== videoH) {
-    preview.width = videoW;
-    preview.height = videoH;
+  if (preview.width !== displayW || preview.height !== displayH) {
+    preview.width = displayW;
+    preview.height = displayH;
   }
   ctx.clearRect(0, 0, preview.width, preview.height);
-  ctx.drawImage(video, 0, 0, videoW, videoH);
+  drawTransformedVideo(ctx, preview.width, preview.height);
   updateCropBox();
 }
 
@@ -354,6 +669,9 @@ function clearPreviewCanvas() {
 }
 
 function startRenderLoop() {
+  if (state.mediaType !== MEDIA_VIDEO) {
+    return;
+  }
   if (state.renderHandle != null) {
     return;
   }
@@ -395,8 +713,9 @@ function revokeObjectUrl() {
 
 // File lifecycle
 function loadFile(file) {
-  if (!file || !file.type.startsWith('video/')) {
-    setStatus('動画ファイルを選択してください。');
+  const mediaType = detectMediaType(file);
+  if (!file || !mediaType) {
+    setStatus('動画/音声ファイルを選択してください。');
     return;
   }
   revokeObjectUrl();
@@ -409,7 +728,7 @@ function loadFile(file) {
   updateCropInputs();
   updateCropSizeLabel();
   updateCropBox();
-  setHasVideo(true);
+  setMediaMode(mediaType);
   if (clearVideo) {
     clearVideo.disabled = false;
   }
@@ -417,10 +736,13 @@ function loadFile(file) {
   video.src = state.objectUrl;
   video.load();
   applyPlaybackRate(state.playbackRate);
-  setStatus('動画を読み込みました。');
+  applyVolume(state.volume * 100);
+  applyVideoTransform();
+  setStatus(`${getMediaLabel(mediaType)}を読み込みました。`);
 }
 
 function clearVideoState() {
+  const clearedLabel = getMediaLabel();
   stopRenderLoop();
   revokeObjectUrl();
   state.file = null;
@@ -443,13 +765,18 @@ function clearVideoState() {
   clearPreviewCanvas();
   updateCropBox();
   updatePreviewLayout();
+  state.transform = { rotation: 0, flipH: false, flipV: false };
+  state.volume = DEFAULT_VOLUME;
   applyPlaybackRate(DEFAULT_PLAYBACK_RATE);
-  setHasVideo(false);
+  applyVolume(DEFAULT_VOLUME * 100);
+  applyVideoTransform();
+  updateTransformUI();
+  setMediaMode(null);
   setButtonsEnabled(false);
   if (clearVideo) {
     clearVideo.disabled = true;
   }
-  setStatus('動画をクリアしました。');
+  setStatus(`${clearedLabel}をクリアしました。`);
 }
 
 // Export helpers
@@ -480,7 +807,7 @@ function getInputName() {
 }
 
 function getCropFilter() {
-  const { width: videoW, height: videoH } = getVideoSize();
+  const { width: videoW, height: videoH } = getDisplaySize();
   if (!videoW || !videoH || !state.crop.width || !state.crop.height) {
     return null;
   }
@@ -491,6 +818,25 @@ function getCropFilter() {
   return `crop=${Math.round(crop.width)}:${Math.round(crop.height)}:${Math.round(
     crop.x
   )}:${Math.round(crop.y)}`;
+}
+
+function getTransformFilters() {
+  const filters = [];
+  const rotation = state.transform.rotation;
+  if (rotation === 90) {
+    filters.push('transpose=1');
+  } else if (rotation === 180) {
+    filters.push('transpose=1', 'transpose=1');
+  } else if (rotation === 270) {
+    filters.push('transpose=2');
+  }
+  if (state.transform.flipH) {
+    filters.push('hflip');
+  }
+  if (state.transform.flipV) {
+    filters.push('vflip');
+  }
+  return filters;
 }
 
 function buildAtempoFilters(rate) {
@@ -566,7 +912,7 @@ async function safeDelete(ffmpeg, path) {
 
 async function runFfmpegCommand({ args, outputName, outputType }) {
   if (!state.file) {
-    throw new Error('先に動画を読み込んでください。');
+    throw new Error('先にファイルを読み込んでください。');
   }
   const ffmpeg = await ensureFfmpeg();
   const inputName = getInputName();
@@ -591,14 +937,19 @@ async function exportVideoWithFfmpeg() {
   const duration = Math.max(0.1, end - start);
   const cropFilter = getCropFilter();
   const speed = getPlaybackRate();
-  const videoFilters = [];
+  const videoFilters = getTransformFilters();
   if (cropFilter) {
     videoFilters.push(cropFilter);
   }
   if (Math.abs(speed - 1) >= 0.001) {
     videoFilters.push(`setpts=PTS/${Number(speed.toFixed(3))}`);
   }
-  const audioFilters = buildAtempoFilters(speed);
+  const audioFilters = [];
+  const volumeFilter = getVolumeFilter();
+  if (volumeFilter) {
+    audioFilters.push(volumeFilter);
+  }
+  audioFilters.push(...buildAtempoFilters(speed));
   const inputName = getInputName();
   const outputName = 'output.mp4';
   const baseArgs = [
@@ -673,7 +1024,13 @@ async function exportAudioWithFfmpeg() {
   const { start, end } = sanitizeTimes();
   const duration = Math.max(0.1, end - start);
   const speed = getPlaybackRate();
-  const audioFilters = buildAtempoFilters(speed);
+  const audioFilters = [];
+  const volumeFilter = getVolumeFilter();
+  if (volumeFilter) {
+    audioFilters.push(volumeFilter);
+  }
+  audioFilters.push(...buildAtempoFilters(speed));
+  const bitrate = getAudioBitrate();
   const inputName = getInputName();
   const outputName = 'audio.mp3';
   const baseArgs = [
@@ -695,15 +1052,15 @@ async function exportAudioWithFfmpeg() {
   const primaryArgs = baseArgs.concat([
     '-c:a',
     'libmp3lame',
-    '-q:a',
-    '2',
+    '-b:a',
+    bitrate,
     outputName,
   ]);
   const fallbackArgs = baseArgs.concat([
     '-c:a',
     'mp3',
-    '-q:a',
-    '2',
+    '-b:a',
+    bitrate,
     outputName,
   ]);
   let blob;
@@ -729,6 +1086,12 @@ async function exportFrameFullWithFfmpeg() {
   const inputName = getInputName();
   const outputName = 'frame-full.png';
   const args = ['-ss', `${time}`, '-i', inputName, '-frames:v', '1'];
+  const transformFilters = getTransformFilters();
+  const filters = transformFilters.slice();
+  filters.push('format=rgb24');
+  if (filters.length) {
+    args.push('-vf', filters.join(','));
+  }
   args.push(outputName);
   const blob = await runFfmpegCommand({
     args,
@@ -741,11 +1104,17 @@ async function exportFrameFullWithFfmpeg() {
 async function exportFrameCroppedWithFfmpeg() {
   const time = Math.max(0, video.currentTime);
   const cropFilter = getCropFilter();
+  const transformFilters = getTransformFilters();
   const inputName = getInputName();
   const outputName = 'frame-crop.png';
   const args = ['-ss', `${time}`, '-i', inputName, '-frames:v', '1'];
+  const filters = transformFilters.slice();
   if (cropFilter) {
-    args.push('-vf', cropFilter);
+    filters.push(cropFilter);
+  }
+  filters.push('format=rgb24');
+  if (filters.length) {
+    args.push('-vf', filters.join(','));
   }
   args.push(outputName);
   const blob = await runFfmpegCommand({
@@ -756,63 +1125,75 @@ async function exportFrameCroppedWithFfmpeg() {
   downloadBlob(blob, `${baseName()}-crop-${formatStamp(time)}.png`);
 }
 
-function exportFrameCroppedFromCanvas() {
-  return new Promise((resolve, reject) => {
-    const { width: videoW, height: videoH } = getVideoSize();
-    if (!videoW || !videoH) {
-      reject(new Error('先に動画を読み込んでください。'));
-      return;
-    }
-    const crop = clampCropRect(state.crop);
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(crop.width));
-    canvas.height = Math.max(1, Math.round(crop.height));
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(
-      video,
-      crop.x,
-      crop.y,
-      crop.width,
-      crop.height,
-      0,
-      0,
-      canvas.width,
-      canvas.height
+async function exportFrameCroppedFromCanvas() {
+  const { width: displayW, height: displayH } = getDisplaySize();
+  if (!displayW || !displayH) {
+    throw new Error('先に動画ファイルを読み込んでください。');
+  }
+  const crop = clampCropRect(state.crop);
+  const frameCanvas = document.createElement('canvas');
+  frameCanvas.width = displayW;
+  frameCanvas.height = displayH;
+  const frameCtx = frameCanvas.getContext('2d');
+  const bitmap = await getFrameBitmap();
+  if (bitmap) {
+    drawTransformedSource(
+      frameCtx,
+      bitmap,
+      bitmap.width,
+      bitmap.height,
+      frameCanvas.width,
+      frameCanvas.height
     );
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        reject(new Error('フレーム保存に失敗しました。'));
-        return;
-      }
-      const time = video.currentTime.toFixed(1).replace('.', 'p');
-      downloadBlob(blob, `${baseName()}-crop-${time}.png`);
-      resolve();
-    }, 'image/png');
-  });
+    bitmap.close();
+  } else if (!drawTransformedVideo(frameCtx, frameCanvas.width, frameCanvas.height)) {
+    throw new Error('フレーム保存に失敗しました。');
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(crop.width));
+  canvas.height = Math.max(1, Math.round(crop.height));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(
+    frameCanvas,
+    crop.x,
+    crop.y,
+    crop.width,
+    crop.height,
+    0,
+    0,
+    canvas.width,
+    canvas.height
+  );
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) {
+    throw new Error('フレーム保存に失敗しました。');
+  }
+  const time = video.currentTime.toFixed(1).replace('.', 'p');
+  downloadBlob(blob, `${baseName()}-crop-${time}.png`);
 }
 
-function exportFrameFullFromCanvas() {
-  return new Promise((resolve, reject) => {
-    const { width: videoW, height: videoH } = getVideoSize();
-    if (!videoW || !videoH) {
-      reject(new Error('先に動画を読み込んでください。'));
-      return;
-    }
-    const canvas = document.createElement('canvas');
-    canvas.width = videoW;
-    canvas.height = videoH;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, videoW, videoH);
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        reject(new Error('フレーム保存に失敗しました。'));
-        return;
-      }
-      const time = video.currentTime.toFixed(1).replace('.', 'p');
-      downloadBlob(blob, `${baseName()}-frame-${time}.png`);
-      resolve();
-    }, 'image/png');
-  });
+async function exportFrameFullFromCanvas() {
+  const { width: displayW, height: displayH } = getDisplaySize();
+  if (!displayW || !displayH) {
+    throw new Error('先に動画ファイルを読み込んでください。');
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = displayW;
+  canvas.height = displayH;
+  const ctx = canvas.getContext('2d');
+  const bitmap = await getFrameBitmap();
+  if (bitmap) {
+    drawTransformedSource(ctx, bitmap, bitmap.width, bitmap.height, canvas.width, canvas.height);
+    bitmap.close();
+  } else if (!drawTransformedVideo(ctx, canvas.width, canvas.height)) {
+    throw new Error('フレーム保存に失敗しました。');
+  }
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) {
+    throw new Error('フレーム保存に失敗しました。');
+  }
+  const time = video.currentTime.toFixed(1).replace('.', 'p');
+  downloadBlob(blob, `${baseName()}-frame-${time}.png`);
 }
 
 // Crop interactions
@@ -840,8 +1221,9 @@ function startCropDrag(event, mode) {
   cropDrag.startX = event.clientX;
   cropDrag.startY = event.clientY;
   cropDrag.startRect = { ...state.crop };
-  cropDrag.scaleX = rect.width / (video.videoWidth || 1);
-  cropDrag.scaleY = rect.height / (video.videoHeight || 1);
+  const { width: displayW, height: displayH } = getDisplaySize();
+  cropDrag.scaleX = rect.width / (displayW || 1);
+  cropDrag.scaleY = rect.height / (displayH || 1);
   if (cropBox) {
     cropBox.setPointerCapture(event.pointerId);
   }
@@ -958,13 +1340,25 @@ video.addEventListener('loadedmetadata', () => {
   state.duration = video.duration;
   startTimeInput.value = '0.0';
   endTimeInput.value = state.duration.toFixed(1);
-  setCropFull();
   updateInfo();
-  drawFrame();
-  updatePreviewLayout();
+  if (state.mediaType === MEDIA_VIDEO) {
+    setCropFull();
+    drawFrame();
+    updatePreviewLayout();
+    primeFirstFrame();
+    applyPlaybackRate(state.playbackRate);
+    applyVolume(state.volume * 100);
+    applyVideoTransform();
+  } else {
+    clearPreviewCanvas();
+    updatePreviewLayout();
+    applyPlaybackRate(state.playbackRate);
+    state.volume = DEFAULT_VOLUME;
+    applyVolume(DEFAULT_VOLUME * 100);
+    video.style.transform = 'none';
+  }
   setButtonsEnabled(true);
-  primeFirstFrame();
-  applyPlaybackRate(state.playbackRate);
+  updateTransformUI();
 });
 
 video.addEventListener('play', startRenderLoop);
@@ -1017,6 +1411,36 @@ if (playbackRateInput) {
   });
 }
 
+if (volumeInput) {
+  volumeInput.addEventListener('input', () => {
+    applyVolume(volumeInput.value);
+  });
+}
+
+if (rotateLeftBtn) {
+  rotateLeftBtn.addEventListener('click', () => {
+    rotateTransform(-ROTATION_STEP);
+  });
+}
+
+if (rotateRightBtn) {
+  rotateRightBtn.addEventListener('click', () => {
+    rotateTransform(ROTATION_STEP);
+  });
+}
+
+if (flipHBtn) {
+  flipHBtn.addEventListener('click', () => {
+    toggleFlip('h');
+  });
+}
+
+if (flipVBtn) {
+  flipVBtn.addEventListener('click', () => {
+    toggleFlip('v');
+  });
+}
+
 if (modeButtons.length) {
   modeButtons.forEach((button) => {
     button.addEventListener('click', () => {
@@ -1027,7 +1451,11 @@ if (modeButtons.length) {
 
 exportVideoBtn.addEventListener('click', async () => {
   if (!state.duration) {
-    setStatus('先に動画を読み込んでください。');
+    setStatus('先に動画ファイルを読み込んでください。');
+    return;
+  }
+  if (state.mediaType !== MEDIA_VIDEO) {
+    setStatus('動画ファイルのみ対応です。');
     return;
   }
   setProcessing(true);
@@ -1044,7 +1472,11 @@ exportVideoBtn.addEventListener('click', async () => {
 
 async function handleExportFrame({ statusPrefix, mode }) {
   if (!state.duration) {
-    setStatus('先に動画を読み込んでください。');
+    setStatus('先に動画ファイルを読み込んでください。');
+    return;
+  }
+  if (state.mediaType !== MEDIA_VIDEO) {
+    setStatus('動画ファイルのみ対応です。');
     return;
   }
   setProcessing(true);
@@ -1085,7 +1517,7 @@ if (exportFrameCropBtn) {
 
 exportAudioBtn.addEventListener('click', async () => {
   if (!state.duration) {
-    setStatus('先に動画を読み込んでください。');
+    setStatus('先にファイルを読み込んでください。');
     return;
   }
   setProcessing(true);
@@ -1108,7 +1540,10 @@ updateCropSizeLabel();
 if (clearVideo) {
   clearVideo.disabled = true;
 }
-setHasVideo(false);
+setMediaMode(null);
 applyPlaybackRate(DEFAULT_PLAYBACK_RATE);
+applyVolume(DEFAULT_VOLUME * 100);
+applyVideoTransform();
+updateTransformUI();
 setUIMode(loadUIMode());
-setStatus('動画をドロップして開始してください。');
+setStatus('動画/音声をドロップして開始してください。');
