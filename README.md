@@ -10,3 +10,12 @@ ffmpeg-core.wasmを使用したローカル動作。広告無し
 
 chrome web storeからもダウンロードできます。
 https://chromewebstore.google.com/detail/jhoopmdknkooacpocbapgmmmgladkfbc?utm_source=item-share-cb
+
+
+## License
+
+This project uses the following libraries:
+
+- **ffmpeg-core.wasm** (@ffmpeg/core): Licensed under GPLv2 or later
+  - FFmpeg and its dependencies are licensed under LGPL v2.1+ and/or GPLv2+
+  - For more details, see: https://github.com/ffmpegwasm/ffmpeg.wasm#what-is-the-license-of-ffmpegwasm
