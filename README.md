@@ -1,21 +1,84 @@
-サイドパネルで動画/音声を簡単にトリミング・書き出し（テーマ切替・再生速度・回転/反転・音量調整対応）。
+# SILVA EDIT
 
-動画関連の、よく使うけど意外と面倒くさい作業をブラウザのサイドパネルでサッと終わらせる拡張機能。
-トリミング、クロップ、トリミング＋クロップ、それぞれを適用させた状態でのフレーム切り出し、再生速度変更、音声のみ切り出し、回転、速度変更が可能。
-windows標準に「なんでこの機能ついてないの？」と辟易としている方におすすめ。
-ffmpeg-core.wasmを使用したローカル動作。広告無し
+動画・音声ファイルを Chrome のサイドパネルで手早く編集できる拡張機能です。  
+トリミング、クロップ、回転/反転、再生速度変更、音声抽出、フレーム保存に対応しています。
 
-出力：mp4, mp3
-入力：MP4, WebM, Ogg, MOV
+## 主な機能
 
-chrome web storeからもダウンロードできます。
-https://chromewebstore.google.com/detail/jhoopmdknkooacpocbapgmmmgladkfbc?utm_source=item-share-cb
+- 長さトリミング（開始/終了秒の指定）
+- 解像度クロップ（ドラッグ + 数値入力）
+- 回転（90°単位）・左右反転・上下反転
+- 再生速度変更（0.25x〜4x）
+- 動画音量調整（0〜200%）
+- MP4 書き出し
+- MP3 書き出し（高: 320kbps / 中: 192kbps）
+- 現在フレーム保存（PNG）
+- クロップ後フレーム保存（PNG）
+- UI テーマ切替（ゆるシルバ / キリシルバ）
 
+## 対応フォーマット
 
-## License
+### 入力
 
-This project uses the following libraries:
+- 動画: `mp4`, `webm`, `mov`, `ogv`, `mkv`（`video/*`）
+- 音声: `mp3`, `wav`, `m4a`, `aac`, `ogg`, `flac`, `opus`（`audio/*`）
 
-- **ffmpeg-core.wasm** (@ffmpeg/core): Licensed under GPLv2 or later
-  - FFmpeg and its dependencies are licensed under LGPL v2.1+ and/or GPLv2+
-  - For more details, see: https://github.com/ffmpegwasm/ffmpeg.wasm#what-is-the-license-of-ffmpegwasm
+### 出力
+
+- 編集動画: `mp4`
+- 音声のみ: `mp3`
+- フレーム画像: `png`
+
+## インストール（ローカル）
+
+1. `chrome://extensions` を開く
+2. 「デベロッパーモード」を ON
+3. 「パッケージ化されていない拡張機能を読み込む」でこのフォルダを選択
+4. ツールバーの SILVA EDIT アイコンをクリックしてサイドパネルを開く
+
+## 使い方
+
+1. 動画/音声をドラッグ&ドロップ（またはクリック選択）
+2. 必要に応じて開始・終了時間、クロップ範囲、速度、回転/反転を調整
+3. 以下のいずれかを実行
+   - `編集動画書き出し`（MP4）
+   - `音声のみ保存（MP3）`
+   - `現在フレームを保存` / `切り取ったフレームを保存`（PNG）
+
+## Chrome Web Store
+
+- https://chromewebstore.google.com/detail/jhoopmdknkooacpocbapgmmmgladkfbc
+
+## 動作方針（プライバシー）
+
+- `ffmpeg-core.wasm` を使ったローカル処理です
+- 編集対象ファイルを外部サーバーへアップロードしません
+- 権限は `sidePanel` のみ（`manifest.json`）
+
+## 注意点
+
+- 音声ファイル入力時は動画系操作（クロップ、回転/反転、動画書き出し、フレーム保存）は無効になります
+- 大きなファイルはブラウザメモリ使用量が増え、処理時間も長くなります
+- サイトではなく拡張サイドパネル上で完結するツールです
+
+## ファイル構成
+
+- `manifest.json`: 拡張定義（MV3 / サイドパネル）
+- `background.js`: アクションクリック時のサイドパネル起動
+- `panel.html`: UI レイアウト
+- `panel.css`: UI スタイル
+- `panel.js`: 編集ロジック（トリム/クロップ/変形/FFmpeg処理）
+- `vendor/ffmpeg/`: FFmpeg WASM 関連ファイル
+- `images/`: アイコン類
+
+## 開発メモ
+
+- バージョン更新時は `manifest.json` の `version` を更新
+- UI 変更時は `panel.html` と `panel.css` をセットで調整
+- 書き出しロジックの変更は `panel.js` の FFmpeg 引数を確認
+
+## ライセンス
+
+- 本プロジェクトは **GPL-2.0-or-later** で配布しています（`LICENSE` を参照）。
+- 同梱する FFmpeg WASM 関連コンポーネントの詳細は `THIRD_PARTY_NOTICES.md` を参照してください。
+- 特に `vendor/ffmpeg/ffmpeg-core.wasm` は `--enable-gpl` を含む構成のため、再配布時はライセンス文書の同梱を維持してください。
