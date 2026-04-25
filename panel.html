@@ -22,6 +22,10 @@
         <div class="info-label">元解像度</div>
         <div id="sourceSize" class="info-value">--</div>
       </div>
+      <div class="edit-mode-switch" role="group" aria-label="編集モード">
+        <button class="edit-mode-btn active" type="button" data-edit-mode="normal" aria-pressed="true">通常編集</button>
+        <button class="edit-mode-btn" type="button" data-edit-mode="bulk" aria-pressed="false">一括分割</button>
+      </div>
     </section>
 
     <section id="dropzone" class="dropzone">
@@ -67,8 +71,14 @@
         <div class="canvas-stage" id="previewStage">
           <canvas id="preview"></canvas>
           <div id="cropBox" class="crop-box" aria-hidden="true">
-            <div id="cropHandleTL" class="crop-handle" data-handle="tl"></div>
-            <div id="cropHandle" class="crop-handle" data-handle="br"></div>
+            <div class="crop-handle" data-handle="tl"></div>
+            <div class="crop-handle crop-handle-edge" data-handle="t"></div>
+            <div class="crop-handle" data-handle="tr"></div>
+            <div class="crop-handle crop-handle-edge" data-handle="r"></div>
+            <div class="crop-handle" data-handle="br"></div>
+            <div class="crop-handle crop-handle-edge" data-handle="b"></div>
+            <div class="crop-handle" data-handle="bl"></div>
+            <div class="crop-handle crop-handle-edge" data-handle="l"></div>
           </div>
         </div>
         <div id="cropSize" class="crop-size">--</div>
@@ -79,6 +89,21 @@
     <section class="controls">
       <div class="control-block trim">
         <div class="block-title">長さトリミング</div>
+        <div class="trim-scrubber" id="trimScrubber">
+          <canvas id="trimThumbs" class="trim-thumbs" aria-hidden="true"></canvas>
+          <div class="trim-track" aria-hidden="true"></div>
+          <div class="trim-range" id="trimRange" aria-hidden="true"></div>
+          <input id="trimStartRange" class="trim-range-input trim-range-start"
+                 type="range" min="0" max="1000" step="1" value="0"
+                 aria-label="開始位置" />
+          <input id="trimEndRange" class="trim-range-input trim-range-end"
+                 type="range" min="0" max="1000" step="1" value="1000"
+                 aria-label="終了位置" />
+        </div>
+        <div class="trim-times">
+          <span id="trimStartLabel">00:00.0</span>
+          <span id="trimEndLabel">00:00.0</span>
+        </div>
         <div class="row split">
           <div class="field">
             <label for="startTime">開始（秒）</label>
@@ -112,6 +137,13 @@
 
       <div class="control-block crop">
         <div class="block-title">解像度クロップ</div>
+        <div class="aspect-presets" role="group" aria-label="アスペクト比">
+          <button class="aspect-btn active" type="button" data-aspect="free" aria-pressed="true">自由</button>
+          <button class="aspect-btn" type="button" data-aspect="1:1" aria-pressed="false">1:1</button>
+          <button class="aspect-btn" type="button" data-aspect="4:3" aria-pressed="false">4:3</button>
+          <button class="aspect-btn" type="button" data-aspect="16:9" aria-pressed="false">16:9</button>
+          <button class="aspect-btn" type="button" data-aspect="9:16" aria-pressed="false">9:16</button>
+        </div>
         <div class="row split">
           <div class="field">
             <label for="outWidth">幅</label>
@@ -123,7 +155,7 @@
           </div>
         </div>
         <button id="useSource" class="ghost small block-action">元解像度</button>
-        <div class="hint">ドラッグで範囲調整。数値入力でも指定できます。</div>
+        <div class="hint">ドラッグで範囲調整。Shiftで一時的に比率固定。</div>
       </div>
 
       <div class="control-block transform">
@@ -188,10 +220,45 @@
       </div>
     </section>
 
-    <section class="actions">
-      <button id="exportVideo" class="primary">編集動画書き出し</button>
-      <button id="exportAudio" class="secondary">音声のみ保存（MP3）</button>
+    <section class="bulk-panel" id="bulkPanel">
+      <div class="control-block bulk-timeline-block">
+        <div class="block-title">分割タイムライン <span id="bulkClipCount" class="clip-count">1 件</span></div>
+        <canvas id="bulkTimeline" class="bulk-timeline"></canvas>
+        <div class="bulk-actions-row">
+          <button id="bulkAddHere" class="ghost small">現在位置で分割</button>
+          <button id="bulkRemoveLast" class="ghost small">最後の分割を削除</button>
+          <button id="bulkClearMarkers" class="ghost small">すべてクリア</button>
+        </div>
+        <div class="bulk-auto-row">
+          <input id="bulkAutoSeconds" type="number" min="1" step="1" value="10" />
+          <span>秒ごとに自動分割</span>
+          <button id="bulkAutoApply" class="ghost small">実行</button>
+        </div>
+      </div>
+      <div class="control-block bulk-list-block">
+        <div class="block-title">分割リスト</div>
+        <ul id="bulkClipList" class="bulk-clip-list"></ul>
+      </div>
     </section>
+
+    <section class="actions">
+      <button id="exportVideo" class="primary mode-normal-only">編集動画書き出し</button>
+      <button id="exportAudio" class="secondary mode-normal-only">音声のみ保存（MP3）</button>
+      <button id="bulkExportAllMp4" class="primary mode-bulk-only">分割を一括書き出し（MP4）</button>
+      <button id="bulkExportAllMp3" class="secondary mode-bulk-only">音声を一括書き出し（MP3）</button>
+      <button id="bulkExportFrames" class="secondary mode-bulk-only">先頭フレームを一括書き出し</button>
+    </section>
+
+    <div class="processing-overlay" id="processingOverlay" hidden aria-live="polite" aria-busy="true">
+      <div class="processing-card">
+        <div class="processing-spinner" aria-hidden="true"></div>
+        <div class="processing-label" id="processingLabel">処理中...</div>
+        <div class="processing-bar">
+          <div class="processing-fill" id="processingFill"></div>
+        </div>
+        <div class="processing-count" id="processingCount"></div>
+      </div>
+    </div>
 
     <footer class="footer">
       <div class="footer-left">

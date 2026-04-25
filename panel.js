@@ -1,20 +1,40 @@
 // DOM
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
-const pickFile = document.getElementById('pickFile');
 const fileNameEl = document.getElementById('fileName');
 const durationEl = document.getElementById('duration');
 const sourceSizeEl = document.getElementById('sourceSize');
 const video = document.getElementById('video');
 const preview = document.getElementById('preview');
 const cropBox = document.getElementById('cropBox');
-const cropHandle = document.getElementById('cropHandle');
-const cropHandleTL = document.getElementById('cropHandleTL');
 const cropSizeEl = document.getElementById('cropSize');
+const aspectButtons = document.querySelectorAll('.aspect-btn');
+const editModeButtons = document.querySelectorAll('.edit-mode-btn');
+const bulkTimeline = document.getElementById('bulkTimeline');
+const bulkClipList = document.getElementById('bulkClipList');
+const bulkClipCount = document.getElementById('bulkClipCount');
+const bulkAddHere = document.getElementById('bulkAddHere');
+const bulkRemoveLast = document.getElementById('bulkRemoveLast');
+const bulkClearMarkers = document.getElementById('bulkClearMarkers');
+const bulkAutoSeconds = document.getElementById('bulkAutoSeconds');
+const bulkAutoApply = document.getElementById('bulkAutoApply');
+const bulkExportAllMp4 = document.getElementById('bulkExportAllMp4');
+const bulkExportAllMp3 = document.getElementById('bulkExportAllMp3');
+const bulkExportFrames = document.getElementById('bulkExportFrames');
+const processingOverlay = document.getElementById('processingOverlay');
+const processingLabel = document.getElementById('processingLabel');
+const processingFill = document.getElementById('processingFill');
+const processingCount = document.getElementById('processingCount');
 const previewSection = document.getElementById('previewSection');
 const clearVideo = document.getElementById('clearVideo');
 const startTimeInput = document.getElementById('startTime');
 const endTimeInput = document.getElementById('endTime');
+const trimStartRange = document.getElementById('trimStartRange');
+const trimEndRange = document.getElementById('trimEndRange');
+const trimRangeFill = document.getElementById('trimRange');
+const trimThumbsCanvas = document.getElementById('trimThumbs');
+const trimStartLabel = document.getElementById('trimStartLabel');
+const trimEndLabel = document.getElementById('trimEndLabel');
 const outWidthInput = document.getElementById('outWidth');
 const outHeightInput = document.getElementById('outHeight');
 const setStartBtn = document.getElementById('setStart');
@@ -57,6 +77,12 @@ const state = {
     width: 0,
     height: 0,
   },
+  aspect: 'free',
+  shiftHeld: false,
+  thumbnails: { generated: false, duration: 0, rotation: 0, generation: 0 },
+  uiMode: 'normal',
+  splitMarkers: [],
+  bulkProgress: { total: 0, done: 0, label: '' },
 };
 
 // FFmpeg state
@@ -85,6 +111,9 @@ const ROTATION_STEP = 90;
 const MODE_KEY = 'silvaEditMode';
 const MODE_YURU = 'yuru';
 const MODE_KIRI = 'kiri';
+const MIN_GAP = 0.05;
+const UI_MODE_NORMAL = 'normal';
+const UI_MODE_BULK = 'bulk';
 
 // UI state
 function setStatus(message) {
@@ -99,6 +128,7 @@ function setUIMode(mode) {
     button.classList.toggle('active', isActive);
     button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
   });
+  if (state.uiMode === UI_MODE_BULK) drawBulkTimeline();
   try {
     localStorage.setItem(MODE_KEY, targetMode);
   } catch (error) {
@@ -133,6 +163,16 @@ function setButtonsEnabled(enabled) {
   setStartBtn.disabled = !enabled;
   setEndBtn.disabled = !enabled;
   useSourceBtn.disabled = !enabled || isAudio;
+  if (bulkAddHere) bulkAddHere.disabled = !enabled || isAudio;
+  if (bulkRemoveLast) bulkRemoveLast.disabled = !enabled || isAudio;
+  if (bulkClearMarkers) bulkClearMarkers.disabled = !enabled || isAudio;
+  if (bulkAutoApply) bulkAutoApply.disabled = !enabled || isAudio;
+  if (bulkAutoSeconds) bulkAutoSeconds.disabled = !enabled || isAudio;
+  if (bulkExportAllMp4) bulkExportAllMp4.disabled = !enabled || isAudio;
+  if (bulkExportAllMp3) bulkExportAllMp3.disabled = !enabled;
+  if (bulkExportFrames) bulkExportFrames.disabled = !enabled || isAudio;
+  aspectButtons.forEach((b) => { b.disabled = !enabled || isAudio; });
+  editModeButtons.forEach((b) => { b.disabled = !enabled || isAudio; });
   if (rotateLeftBtn) {
     rotateLeftBtn.disabled = !enabled || isAudio;
   }
@@ -163,17 +203,29 @@ function setButtonsEnabled(enabled) {
 }
 
 function setProcessing(processing) {
+  document.body.classList.toggle('processing', processing);
+  if (fileInput) fileInput.disabled = processing;
+  if (dropzone) dropzone.classList.toggle('disabled', processing);
+  if (clearVideo) clearVideo.disabled = processing || !state.file;
+  if (processingOverlay) {
+    if (processing) {
+      processingOverlay.hidden = false;
+      if (processingLabel) processingLabel.textContent = '処理中...';
+      if (processingFill) processingFill.style.width = '0%';
+      if (processingCount) processingCount.textContent = '';
+    } else {
+      processingOverlay.hidden = true;
+    }
+  }
   if (processing) {
     setButtonsEnabled(false);
-    if (pickFile) {
-      pickFile.disabled = true;
-    }
     return;
   }
-  if (pickFile) {
-    pickFile.disabled = false;
-  }
   setButtonsEnabled(Boolean(state.duration));
+}
+
+function isProcessing() {
+  return document.body.classList.contains('processing');
 }
 
 // Formatting
@@ -305,6 +357,210 @@ function getVolumeFilter() {
   return `volume=${volume.toFixed(2)}`;
 }
 
+// Trim scrubber (dual range + thumbnail strip)
+const TRIM_RANGE_MIN = 1000;
+const TRIM_RANGE_MAX = 100000;
+const TRIM_THUMB_COUNT = 5;
+let trimSyncing = false;
+
+function getTrimRangeMax() {
+  if (!state.duration) return TRIM_RANGE_MIN;
+  return Math.max(TRIM_RANGE_MIN, Math.min(TRIM_RANGE_MAX, Math.round(state.duration * 10)));
+}
+
+function rangeToTime(value) {
+  if (!state.duration) return 0;
+  const max = getTrimRangeMax();
+  return (Number(value) / max) * state.duration;
+}
+
+function timeToRange(time) {
+  if (!state.duration) return 0;
+  const max = getTrimRangeMax();
+  return Math.round((time / state.duration) * max);
+}
+
+function applyTrimRangeMax() {
+  if (!trimStartRange || !trimEndRange) return;
+  const max = getTrimRangeMax();
+  trimStartRange.max = String(max);
+  trimEndRange.max = String(max);
+}
+
+function updateTrimRangeFill() {
+  if (!trimRangeFill || !trimStartRange || !trimEndRange) return;
+  const max = getTrimRangeMax() || 1;
+  const start = Number(trimStartRange.value) / max;
+  const end = Number(trimEndRange.value) / max;
+  const left = Math.max(0, Math.min(1, start));
+  const right = Math.max(0, Math.min(1, end));
+  trimRangeFill.style.clipPath = `inset(0 ${(1 - right) * 100}% 0 ${left * 100}%)`;
+}
+
+function updateTrimLabels() {
+  if (!trimStartLabel || !trimEndLabel) return;
+  const start = rangeToTime(trimStartRange?.value ?? 0);
+  const end = rangeToTime(trimEndRange?.value ?? getTrimRangeMax());
+  trimStartLabel.textContent = formatTrimTime(start);
+  trimEndLabel.textContent = formatTrimTime(end);
+}
+
+function formatTrimTime(seconds) {
+  if (!Number.isFinite(seconds)) return '00:00.0';
+  const total = Math.max(0, seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total - mins * 60;
+  return `${String(mins).padStart(2, '0')}:${secs.toFixed(1).padStart(4, '0')}`;
+}
+
+function applyTrimUIFromInputs() {
+  const start = parseFloat(startTimeInput.value);
+  const end = parseFloat(endTimeInput.value);
+  if (Number.isFinite(start) && trimStartRange) {
+    trimStartRange.value = String(timeToRange(start));
+  }
+  if (Number.isFinite(end) && trimEndRange) {
+    trimEndRange.value = String(timeToRange(end));
+  }
+  updateTrimRangeFill();
+  updateTrimLabels();
+}
+
+function syncTrimFromInputs() {
+  if (trimSyncing) return;
+  trimSyncing = true;
+  try {
+    applyTrimUIFromInputs();
+  } finally {
+    trimSyncing = false;
+  }
+}
+
+function syncTrimFromRange(source) {
+  if (trimSyncing) return;
+  trimSyncing = true;
+  try {
+    const max = getTrimRangeMax();
+    let startVal = Number(trimStartRange?.value || 0);
+    let endVal = Number(trimEndRange?.value || max);
+    if (source === 'start' && startVal > endVal) {
+      endVal = Math.min(max, startVal);
+      if (trimEndRange) trimEndRange.value = String(endVal);
+    } else if (source === 'end' && endVal < startVal) {
+      startVal = Math.max(0, endVal);
+      if (trimStartRange) trimStartRange.value = String(startVal);
+    }
+    const startSec = rangeToTime(startVal);
+    const endSec = rangeToTime(endVal);
+    if (startTimeInput) startTimeInput.value = startSec.toFixed(1);
+    if (endTimeInput) endTimeInput.value = endSec.toFixed(1);
+    sanitizeTimes();
+    applyTrimUIFromInputs();
+    // プレビュー追従: 操作中のハンドル時刻にseek
+    if (state.mediaType === MEDIA_VIDEO || state.mediaType === MEDIA_AUDIO) {
+      const targetTime = source === 'end' ? endSec : startSec;
+      if (Number.isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.01) {
+        try {
+          // duration ピッタリへの seek は ended 状態を誘発するので余裕を取る
+          const safeTarget = Math.max(0, Math.min(state.duration - 0.05, targetTime));
+          video.currentTime = safeTarget;
+        } catch (error) { /* seek失敗は無視 */ }
+      }
+    }
+  } finally {
+    trimSyncing = false;
+  }
+}
+
+// 専用オフスクリーン video からサムネを焼く（再生位置を壊さない）
+async function generateTrimThumbnails() {
+  if (!trimThumbsCanvas) return;
+  if (state.mediaType !== MEDIA_VIDEO) {
+    const ctx = trimThumbsCanvas.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, trimThumbsCanvas.width, trimThumbsCanvas.height);
+    state.thumbnails.generated = false;
+    return;
+  }
+  if (!state.objectUrl || !state.duration) return;
+  // 再生成判定（同条件なら現在のcanvas描画をそのまま使う）
+  const cached = state.thumbnails;
+  if (cached.generated && cached.duration === state.duration && cached.rotation === state.transform.rotation) {
+    return;
+  }
+  const generation = ++state.thumbnails.generation;
+  const offscreen = document.createElement('video');
+  offscreen.muted = true;
+  offscreen.preload = 'auto';
+  offscreen.crossOrigin = 'anonymous';
+  try {
+    offscreen.src = state.objectUrl;
+    await new Promise((resolve, reject) => {
+      offscreen.addEventListener('loadedmetadata', resolve, { once: true });
+      offscreen.addEventListener('error', reject, { once: true });
+    }).catch(() => {});
+    if (generation !== state.thumbnails.generation) return;
+    const srcW = offscreen.videoWidth, srcH = offscreen.videoHeight;
+    if (!srcW || !srcH) return;
+    const stripRect = trimThumbsCanvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    trimThumbsCanvas.width = Math.max(1, Math.round(stripRect.width * dpr));
+    trimThumbsCanvas.height = Math.max(1, Math.round(stripRect.height * dpr));
+    const ctx = trimThumbsCanvas.getContext('2d');
+    ctx.clearRect(0, 0, trimThumbsCanvas.width, trimThumbsCanvas.height);
+    const cellW = trimThumbsCanvas.width / TRIM_THUMB_COUNT;
+    const cellH = trimThumbsCanvas.height;
+    for (let i = 0; i < TRIM_THUMB_COUNT; i++) {
+      if (generation !== state.thumbnails.generation) return;
+      const t = (i + 0.5) * (state.duration / TRIM_THUMB_COUNT);
+      try {
+        offscreen.currentTime = Math.min(state.duration - 0.05, Math.max(0, t));
+        await new Promise((resolve) => {
+          const onSeeked = () => { offscreen.removeEventListener('seeked', onSeeked); resolve(); };
+          offscreen.addEventListener('seeked', onSeeked);
+          setTimeout(() => { offscreen.removeEventListener('seeked', onSeeked); resolve(); }, 1500);
+        });
+      } catch (error) {
+        continue;
+      }
+      if (generation !== state.thumbnails.generation) return;
+      // rotation考慮: getDisplaySize の比率で fit
+      const display = state.transform.rotation % 180 === 0
+        ? { w: srcW, h: srcH } : { w: srcH, h: srcW };
+      const scale = Math.max(cellW / display.w, cellH / display.h);
+      const drawW = display.w * scale;
+      const drawH = display.h * scale;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(i * cellW, 0, cellW, cellH);
+      ctx.clip();
+      ctx.translate(i * cellW + cellW / 2, cellH / 2);
+      ctx.rotate((state.transform.rotation * Math.PI) / 180);
+      if (state.transform.flipH) ctx.scale(-1, 1);
+      if (state.transform.flipV) ctx.scale(1, -1);
+      if (state.transform.rotation % 180 === 0) {
+        ctx.drawImage(offscreen, -drawW / 2, -drawH / 2, drawW, drawH);
+      } else {
+        ctx.drawImage(offscreen, -drawH / 2, -drawW / 2, drawH, drawW);
+      }
+      ctx.restore();
+    }
+    state.thumbnails.generated = true;
+    state.thumbnails.duration = state.duration;
+    state.thumbnails.rotation = state.transform.rotation;
+  } finally {
+    offscreen.removeAttribute('src');
+    offscreen.load();
+  }
+}
+
+function clearTrimThumbnails() {
+  if (!trimThumbsCanvas) return;
+  const ctx = trimThumbsCanvas.getContext('2d');
+  if (ctx) ctx.clearRect(0, 0, trimThumbsCanvas.width, trimThumbsCanvas.height);
+  state.thumbnails.generated = false;
+  state.thumbnails.duration = 0;
+}
+
 // Trim timing
 function sanitizeTimes() {
   if (!state.duration) {
@@ -330,6 +586,168 @@ function sanitizeTimes() {
 
 // Crop geometry
 const MIN_CROP_SIZE = 32;
+
+const ASPECT_RATIOS = {
+  free: null,
+  '1:1': 1,
+  '4:3': 4 / 3,
+  '16:9': 16 / 9,
+  '9:16': 9 / 16,
+};
+
+// 各ハンドルが「どの辺をどう動かすか」と「アンカー（固定する点）」
+// edges係数: dx/dyを掛けて「左/右/上/下辺の移動量」に
+// anchorX/Y: 固定したい横/縦の基準位置（'min'|'max'|'mid'）
+const HANDLE_SPEC = {
+  tl: { edges: { left: 1, right: 0, top: 1, bottom: 0 }, anchorX: 'max', anchorY: 'max' },
+  tr: { edges: { left: 0, right: 1, top: 1, bottom: 0 }, anchorX: 'min', anchorY: 'max' },
+  br: { edges: { left: 0, right: 1, top: 0, bottom: 1 }, anchorX: 'min', anchorY: 'min' },
+  bl: { edges: { left: 1, right: 0, top: 0, bottom: 1 }, anchorX: 'max', anchorY: 'min' },
+  t:  { edges: { left: 0, right: 0, top: 1, bottom: 0 }, anchorX: 'mid', anchorY: 'max' },
+  b:  { edges: { left: 0, right: 0, top: 0, bottom: 1 }, anchorX: 'mid', anchorY: 'min' },
+  l:  { edges: { left: 1, right: 0, top: 0, bottom: 0 }, anchorX: 'max', anchorY: 'mid' },
+  r:  { edges: { left: 0, right: 1, top: 0, bottom: 0 }, anchorX: 'min', anchorY: 'mid' },
+};
+
+function syncAspectButtons() {
+  aspectButtons.forEach((b) => {
+    const isActive = b.dataset.aspect === state.aspect;
+    b.classList.toggle('active', isActive);
+    b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+}
+
+function getActiveAspectRatio() {
+  if (state.shiftHeld && state.aspect === 'free') {
+    if (state.crop.width && state.crop.height) {
+      return state.crop.width / state.crop.height;
+    }
+  }
+  return ASPECT_RATIOS[state.aspect];
+}
+
+// 8点リサイズ：handleに応じてedgesを動かす。anchorに対する自由度の制約を保つ。
+function applyHandleDelta(start, handle, dx, dy) {
+  if (handle === 'move') {
+    return { x: start.x + dx, y: start.y + dy, width: start.width, height: start.height };
+  }
+  const spec = HANDLE_SPEC[handle];
+  if (!spec) return { ...start };
+  let left = start.x + spec.edges.left * dx;
+  let right = start.x + start.width + spec.edges.right * dx;
+  let top = start.y + spec.edges.top * dy;
+  let bottom = start.y + start.height + spec.edges.bottom * dy;
+  if (right < left + MIN_CROP_SIZE) {
+    if (spec.edges.left)  left = right - MIN_CROP_SIZE;
+    if (spec.edges.right) right = left + MIN_CROP_SIZE;
+  }
+  if (bottom < top + MIN_CROP_SIZE) {
+    if (spec.edges.top)    top = bottom - MIN_CROP_SIZE;
+    if (spec.edges.bottom) bottom = top + MIN_CROP_SIZE;
+  }
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+// アスペクト固定: 指定アンカーを保ったまま、片方のサイズに合わせてもう片方を再計算
+function fitAspectFromAnchor(rect, handle, ratio, bounds) {
+  if (!ratio) return rect;
+  const spec = HANDLE_SPEC[handle];
+  if (!spec) return rect;
+  let { x, y, width, height } = rect;
+  // 横辺ハンドル(t/b)では heightドリブン → width決定
+  // 縦辺ハンドル(l/r)では widthドリブン → height決定
+  // 角ハンドルでは大きい方ドリブン → 比率に詰める（widthドリブンで統一）
+  let driveByWidth;
+  if (handle === 't' || handle === 'b') driveByWidth = false;
+  else if (handle === 'l' || handle === 'r') driveByWidth = true;
+  else driveByWidth = (width / height) > ratio;
+  if (driveByWidth) {
+    height = width / ratio;
+  } else {
+    width = height * ratio;
+  }
+  // アンカーに従って x/y を再配置
+  const anchorXPos = spec.anchorX === 'max' ? rect.x + rect.width
+    : spec.anchorX === 'mid' ? rect.x + rect.width / 2 : rect.x;
+  const anchorYPos = spec.anchorY === 'max' ? rect.y + rect.height
+    : spec.anchorY === 'mid' ? rect.y + rect.height / 2 : rect.y;
+  x = spec.anchorX === 'max' ? anchorXPos - width
+    : spec.anchorX === 'mid' ? anchorXPos - width / 2 : anchorXPos;
+  y = spec.anchorY === 'max' ? anchorYPos - height
+    : spec.anchorY === 'mid' ? anchorYPos - height / 2 : anchorYPos;
+  return { x, y, width, height };
+}
+
+// 比率を保ったまま境界内に収める。境界に当たったら同方向に縮める。
+function clampPreservingAspect(rect, handle, ratio, bounds) {
+  if (!ratio) return clampCropRect(rect);
+  const spec = HANDLE_SPEC[handle];
+  if (!spec) return clampCropRect(rect);
+  let { x, y, width, height } = rect;
+  const minW = Math.min(MIN_CROP_SIZE, bounds.width);
+  const minH = Math.min(MIN_CROP_SIZE, bounds.height);
+  width = Math.max(width, minW);
+  height = Math.max(height, minH);
+  // 境界外にはみ出しているなら、アンカー固定で縮める
+  let maxWidth = bounds.width;
+  let maxHeight = bounds.height;
+  if (spec.anchorX === 'max') maxWidth = Math.min(maxWidth, x + width);
+  else if (spec.anchorX === 'min') maxWidth = Math.min(maxWidth, bounds.width - x);
+  else maxWidth = Math.min(maxWidth, 2 * Math.min(x + width / 2, bounds.width - (x + width / 2)));
+  if (spec.anchorY === 'max') maxHeight = Math.min(maxHeight, y + height);
+  else if (spec.anchorY === 'min') maxHeight = Math.min(maxHeight, bounds.height - y);
+  else maxHeight = Math.min(maxHeight, 2 * Math.min(y + height / 2, bounds.height - (y + height / 2)));
+  // 比率を保ちながら縮める
+  if (width > maxWidth) {
+    width = Math.max(maxWidth, minW);
+    height = width / ratio;
+  }
+  if (height > maxHeight) {
+    height = Math.max(maxHeight, minH);
+    width = height * ratio;
+  }
+  // アンカー基準で再配置
+  const anchorXPos = spec.anchorX === 'max' ? x + rect.width
+    : spec.anchorX === 'mid' ? x + rect.width / 2 : x;
+  const anchorYPos = spec.anchorY === 'max' ? y + rect.height
+    : spec.anchorY === 'mid' ? y + rect.height / 2 : y;
+  x = spec.anchorX === 'max' ? anchorXPos - width
+    : spec.anchorX === 'mid' ? anchorXPos - width / 2 : anchorXPos;
+  y = spec.anchorY === 'max' ? anchorYPos - height
+    : spec.anchorY === 'mid' ? anchorYPos - height / 2 : anchorYPos;
+  // 最終的な境界 clamp（アンカー方向には動かさない）
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x + width > bounds.width) x = bounds.width - width;
+  if (y + height > bounds.height) y = bounds.height - height;
+  return { x, y, width, height };
+}
+
+// プリセット切替時用：中心固定で短辺合わせ
+function fitAspectCentered(rect, ratio, bounds) {
+  if (!ratio) return rect;
+  const cx = rect.x + rect.width / 2;
+  const cy = rect.y + rect.height / 2;
+  let width = rect.width;
+  let height = rect.height;
+  if (width / height > ratio) {
+    width = height * ratio;
+  } else {
+    height = width / ratio;
+  }
+  // 境界に収める（中心軸を維持しつつ縮小）
+  const maxW = Math.min(bounds.width, 2 * Math.min(cx, bounds.width - cx));
+  const maxH = Math.min(bounds.height, 2 * Math.min(cy, bounds.height - cy));
+  if (width > maxW) {
+    width = maxW;
+    height = width / ratio;
+  }
+  if (height > maxH) {
+    height = maxH;
+    width = height * ratio;
+  }
+  return { x: cx - width / 2, y: cy - height / 2, width, height };
+}
 
 function getSourceSize() {
   return {
@@ -400,16 +818,30 @@ function updateCropBox() {
   if (!rect.width || !rect.height) {
     return;
   }
+  // canvasがmax-height制約で中央寄せされるケースに対応：
+  // cropBoxの親（canvas-stage）基準で配置するため、canvasのオフセットを加算
+  const parent = cropBox.offsetParent || cropBox.parentElement;
+  const parentRect = parent ? parent.getBoundingClientRect() : rect;
+  const offsetX = rect.left - parentRect.left;
+  const offsetY = rect.top - parentRect.top;
   const scaleX = rect.width / videoW;
   const scaleY = rect.height / videoH;
-  cropBox.style.left = `${state.crop.x * scaleX}px`;
-  cropBox.style.top = `${state.crop.y * scaleY}px`;
+  cropBox.style.left = `${offsetX + state.crop.x * scaleX}px`;
+  cropBox.style.top = `${offsetY + state.crop.y * scaleY}px`;
   cropBox.style.width = `${state.crop.width * scaleX}px`;
   cropBox.style.height = `${state.crop.height * scaleY}px`;
 }
 
 function setCropRect(rect) {
   state.crop = clampCropRect(rect);
+  updateCropInputs();
+  updateCropSizeLabel();
+  updateCropBox();
+}
+
+// 既に正規化済み（比率固定+境界収束済み）の矩形を直接適用する。
+function setCropRectRaw(rect) {
+  state.crop = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   updateCropInputs();
   updateCropSizeLabel();
   updateCropBox();
@@ -552,6 +984,10 @@ function rotateTransform(delta) {
   }
   updateTransformUI();
   drawFrame();
+  if (state.mediaType === MEDIA_VIDEO) {
+    state.thumbnails.generated = false;
+    generateTrimThumbnails();
+  }
 }
 
 function toggleFlip(axis) {
@@ -576,6 +1012,10 @@ function toggleFlip(axis) {
   }
   updateTransformUI();
   drawFrame();
+  if (state.mediaType === MEDIA_VIDEO) {
+    state.thumbnails.generated = false;
+    generateTrimThumbnails();
+  }
 }
 
 function drawTransformedSource(ctx, source, sourceW, sourceH, displayW, displayH) {
@@ -713,6 +1153,10 @@ function revokeObjectUrl() {
 
 // File lifecycle
 function loadFile(file) {
+  if (isProcessing()) {
+    setStatus('処理中はファイルを変更できません。');
+    return;
+  }
   const mediaType = detectMediaType(file);
   if (!file || !mediaType) {
     setStatus('動画/音声ファイルを選択してください。');
@@ -724,11 +1168,21 @@ function loadFile(file) {
   state.fileName = file.name;
   state.duration = 0;
   state.crop = { x: 0, y: 0, width: 0, height: 0 };
+  state.splitMarkers = [];
+  state.aspect = 'free';
+  state.thumbnails.generated = false;
+  state.thumbnails.duration = 0;
+  state.thumbnails.rotation = 0;
+  state.thumbnails.generation++;
+  syncAspectButtons();
   updateInfo();
   updateCropInputs();
   updateCropSizeLabel();
   updateCropBox();
   setMediaMode(mediaType);
+  if (mediaType === MEDIA_AUDIO) {
+    setEditMode(UI_MODE_NORMAL);
+  }
   if (clearVideo) {
     clearVideo.disabled = false;
   }
@@ -742,6 +1196,10 @@ function loadFile(file) {
 }
 
 function clearVideoState() {
+  if (isProcessing()) {
+    setStatus('処理中はクリアできません。');
+    return;
+  }
   const clearedLabel = getMediaLabel();
   stopRenderLoop();
   revokeObjectUrl();
@@ -749,6 +1207,9 @@ function clearVideoState() {
   state.fileName = null;
   state.duration = 0;
   state.crop = { x: 0, y: 0, width: 0, height: 0 };
+  state.splitMarkers = [];
+  state.aspect = 'free';
+  syncAspectButtons();
   if (video) {
     video.pause();
     video.removeAttribute('src');
@@ -757,6 +1218,12 @@ function clearVideoState() {
   fileInput.value = '';
   startTimeInput.value = '';
   endTimeInput.value = '';
+  clearTrimThumbnails();
+  applyTrimRangeMax();
+  if (trimStartRange) trimStartRange.value = '0';
+  if (trimEndRange) trimEndRange.value = String(getTrimRangeMax());
+  updateTrimRangeFill();
+  updateTrimLabels();
   outWidthInput.value = '';
   outHeightInput.value = '';
   updateInfo();
@@ -881,11 +1348,14 @@ async function ensureFfmpeg() {
     throw new Error('FFmpeg が利用できません。');
   }
   const ffmpeg = new window.FFmpegWASM.FFmpeg();
+  let lastProgressBucket = -1;
   ffmpeg.on('progress', ({ progress }) => {
-    if (Number.isFinite(progress)) {
-      const percent = Math.round(progress * 100);
-      setStatus(`FFmpeg 処理中 ${percent}%`);
-    }
+    if (!Number.isFinite(progress)) return;
+    const bucket = Math.floor(progress * 10);  // 10%刻み
+    if (bucket === lastProgressBucket) return;
+    lastProgressBucket = bucket;
+    const percent = Math.round(progress * 100);
+    setStatus(`FFmpeg 処理中 ${percent}%`);
   });
   const coreURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.js');
   const wasmURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.wasm');
@@ -910,24 +1380,70 @@ async function safeDelete(ffmpeg, path) {
   }
 }
 
-async function runFfmpegCommand({ args, outputName, outputType }) {
+// FFmpeg exec を直列化する mutex。UI disabled とは別レイヤーで FS 整合性を保護。
+const ffmpegQueue = {
+  tail: Promise.resolve(),
+  run(task) {
+    const next = this.tail.then(() => task());
+    this.tail = next.catch(() => {});
+    return next;
+  },
+};
+
+// items: [{ variants: [{args}, ...], outputName, outputType }]
+// onItemDone(item, blob, index): 各item完了直後に呼ぶ。Blobをbatch配列に貯めずメモリピークを抑える。
+async function runFfmpegBatch(items, { onItemDone } = {}) {
   if (!state.file) {
     throw new Error('先にファイルを読み込んでください。');
   }
-  const ffmpeg = await ensureFfmpeg();
-  const inputName = getInputName();
-  await safeDelete(ffmpeg, inputName);
-  await safeDelete(ffmpeg, outputName);
-  const buffer = await state.file.arrayBuffer();
-  await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
-  try {
-    await ffmpeg.exec(args);
-    const data = await ffmpeg.readFile(outputName);
-    return toBlob(data, outputType);
-  } finally {
+  return ffmpegQueue.run(async () => {
+    const ffmpeg = await ensureFfmpeg();
+    const inputName = getInputName();
     await safeDelete(ffmpeg, inputName);
-    await safeDelete(ffmpeg, outputName);
+    const buffer = await state.file.arrayBuffer();
+    await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        let blob = null;
+        let lastError = null;
+        for (const variant of item.variants) {
+          await safeDelete(ffmpeg, item.outputName);
+          try {
+            await ffmpeg.exec(variant.args);
+            const data = await ffmpeg.readFile(item.outputName);
+            blob = toBlob(data, item.outputType);
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        await safeDelete(ffmpeg, item.outputName);
+        if (!blob) {
+          throw lastError || new Error(`書き出しに失敗しました: ${item.outputName}`);
+        }
+        if (onItemDone) {
+          await onItemDone(item, blob, i);
+        }
+      }
+    } finally {
+      await safeDelete(ffmpeg, inputName);
+    }
+  });
+}
+
+// 既存呼び出し点向けの薄いラッパ。primary/fallback を variants に詰める。
+async function runFfmpegCommand({ args, outputName, outputType, fallbackArgs }) {
+  const variants = [{ args }];
+  if (fallbackArgs) {
+    variants.push({ args: fallbackArgs });
   }
+  let resultBlob = null;
+  await runFfmpegBatch(
+    [{ variants, outputName, outputType }],
+    { onItemDone: (_item, blob) => { resultBlob = blob; } }
+  );
+  return resultBlob;
 }
 
 
@@ -1002,20 +1518,12 @@ async function exportVideoWithFfmpeg() {
     '+faststart',
     outputName,
   ]);
-  let blob;
-  try {
-    blob = await runFfmpegCommand({
-      args: primaryArgs,
-      outputName,
-      outputType: 'video/mp4',
-    });
-  } catch (error) {
-    blob = await runFfmpegCommand({
-      args: fallbackArgs,
-      outputName,
-      outputType: 'video/mp4',
-    });
-  }
+  const blob = await runFfmpegCommand({
+    args: primaryArgs,
+    fallbackArgs,
+    outputName,
+    outputType: 'video/mp4',
+  });
   const clip = formatClipLabel(start, end);
   downloadBlob(blob, `${baseName()}-${clip}.mp4`);
 }
@@ -1063,20 +1571,12 @@ async function exportAudioWithFfmpeg() {
     bitrate,
     outputName,
   ]);
-  let blob;
-  try {
-    blob = await runFfmpegCommand({
-      args: primaryArgs,
-      outputName,
-      outputType: 'audio/mpeg',
-    });
-  } catch (error) {
-    blob = await runFfmpegCommand({
-      args: fallbackArgs,
-      outputName,
-      outputType: 'audio/mpeg',
-    });
-  }
+  const blob = await runFfmpegCommand({
+    args: primaryArgs,
+    fallbackArgs,
+    outputName,
+    outputType: 'audio/mpeg',
+  });
   const clip = formatClipLabel(start, end);
   downloadBlob(blob, `${baseName()}-audio-${clip}.mp3`);
 }
@@ -1196,10 +1696,606 @@ async function exportFrameFullFromCanvas() {
   downloadBlob(blob, `${baseName()}-frame-${time}.png`);
 }
 
+// Bulk split mode
+function setEditMode(mode) {
+  const target = mode === UI_MODE_BULK ? UI_MODE_BULK : UI_MODE_NORMAL;
+  state.uiMode = target;
+  document.body.classList.toggle('mode-bulk', target === UI_MODE_BULK);
+  editModeButtons.forEach((b) => {
+    const isActive = b.dataset.editMode === target;
+    b.classList.toggle('active', isActive);
+    b.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+  if (target === UI_MODE_BULK) {
+    renderClipList();
+    drawBulkTimeline();
+  }
+}
+
+function sortAndDedupeMarkers(markers, duration) {
+  const valid = markers
+    .filter((m) => Number.isFinite(m) && m >= MIN_GAP && m <= duration - MIN_GAP)
+    .sort((a, b) => a - b);
+  const out = [];
+  for (const m of valid) {
+    if (!out.length || m - out[out.length - 1] >= MIN_GAP) out.push(m);
+  }
+  return out;
+}
+
+function markersToClips() {
+  if (!state.duration) return [];
+  const points = [0, ...state.splitMarkers, state.duration];
+  const clips = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const start = points[i];
+    const end = points[i + 1];
+    clips.push({
+      index: i,
+      start,
+      end,
+      duration: end - start,
+      label: `clip_${String(i + 1).padStart(2, '0')}`,
+    });
+  }
+  return clips;
+}
+
+function setSplitMarkers(next) {
+  state.splitMarkers = sortAndDedupeMarkers(next, state.duration);
+  renderClipList();
+  drawBulkTimeline();
+}
+
+function bulkAddMarkerAt(time) {
+  if (!state.duration) return false;
+  const t = Math.min(Math.max(time, MIN_GAP), state.duration - MIN_GAP);
+  const next = [...state.splitMarkers, t];
+  const sorted = sortAndDedupeMarkers(next, state.duration);
+  if (sorted.length === state.splitMarkers.length) {
+    setStatus('近すぎる位置のため追加できませんでした。');
+    return false;
+  }
+  state.splitMarkers = sorted;
+  renderClipList();
+  drawBulkTimeline();
+  return true;
+}
+
+function bulkRemoveLastMarker() {
+  if (!state.splitMarkers.length) return;
+  state.splitMarkers = state.splitMarkers.slice(0, -1);
+  renderClipList();
+  drawBulkTimeline();
+}
+
+function bulkClearAllMarkers() {
+  if (!state.splitMarkers.length) return;
+  state.splitMarkers = [];
+  renderClipList();
+  drawBulkTimeline();
+}
+
+function bulkAutoSplitEvery(seconds) {
+  if (!state.duration) return;
+  const step = Number(seconds);
+  if (!Number.isFinite(step) || step < 1) {
+    setStatus('1秒以上の値を指定してください。');
+    return;
+  }
+  const next = [];
+  for (let t = step; t < state.duration - MIN_GAP; t += step) {
+    next.push(t);
+  }
+  setSplitMarkers(next);
+  setStatus(`${state.splitMarkers.length} 個のマーカーを追加しました。`);
+}
+
+function commitClipBoundary(rowIndex, edge, rawValue) {
+  const markerIndex = edge === 'start' ? rowIndex - 1 : rowIndex;
+  if (markerIndex < 0 || markerIndex >= state.splitMarkers.length) return false;
+  const prev = state.splitMarkers[markerIndex - 1] ?? 0;
+  const next = state.splitMarkers[markerIndex + 1] ?? state.duration;
+  const lo = prev + MIN_GAP;
+  const hi = next - MIN_GAP;
+  if (lo >= hi) return false;
+  if (!Number.isFinite(rawValue)) return false;
+  const value = Math.min(Math.max(rawValue, lo), hi);
+  const trial = [...state.splitMarkers];
+  trial[markerIndex] = value;
+  const sorted = sortAndDedupeMarkers(trial, state.duration);
+  if (sorted.length !== state.splitMarkers.length) return false;
+  if (Math.abs(sorted[markerIndex] - value) > 0.01) return false;
+  state.splitMarkers = sorted;
+  if (Math.abs(value - rawValue) > 0.01) {
+    setStatus(`値を ${value.toFixed(1)}秒 に調整しました。`);
+  }
+  return true;
+}
+
+function drawBulkTimeline() {
+  if (!bulkTimeline) return;
+  const rect = bulkTimeline.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  bulkTimeline.width = Math.max(1, Math.round(rect.width * dpr));
+  bulkTimeline.height = Math.max(1, Math.round(rect.height * dpr));
+  const ctx = bulkTimeline.getContext('2d');
+  ctx.clearRect(0, 0, bulkTimeline.width, bulkTimeline.height);
+  if (!state.duration) return;
+  const styles = getComputedStyle(document.body);
+  const accent = styles.getPropertyValue('--accent').trim() || '#d35f42';
+  const muted = styles.getPropertyValue('--muted').trim() || '#888';
+  const bg = styles.getPropertyValue('--surface').trim() || '#fff';
+  const clips = markersToClips();
+  const w = bulkTimeline.width;
+  const h = bulkTimeline.height;
+  const palette = ['rgba(255,255,255,0.08)', 'rgba(255,255,255,0.16)'];
+  for (const clip of clips) {
+    const x0 = (clip.start / state.duration) * w;
+    const x1 = (clip.end / state.duration) * w;
+    ctx.fillStyle = palette[clip.index % 2];
+    ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
+    // ラベル
+    ctx.fillStyle = bg;
+    ctx.font = `${12 * dpr}px sans-serif`;
+    ctx.textBaseline = 'middle';
+    if (x1 - x0 > 36 * dpr) {
+      ctx.fillText(clip.label, x0 + 6 * dpr, h / 2);
+    }
+  }
+  // マーカー線
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2 * dpr;
+  for (const m of state.splitMarkers) {
+    const x = (m / state.duration) * w;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  // 現在再生位置
+  if (state.mediaType === MEDIA_VIDEO && Number.isFinite(video.currentTime)) {
+    ctx.strokeStyle = muted;
+    ctx.lineWidth = 1 * dpr;
+    const x = (video.currentTime / state.duration) * w;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h);
+    ctx.stroke();
+  }
+  if (bulkClipCount) {
+    bulkClipCount.textContent = `${clips.length} 件`;
+  }
+}
+
+function renderClipList() {
+  if (!bulkClipList) return;
+  const clips = markersToClips();
+  // 行DOMの再利用（フォーカス保持）
+  const existing = Array.from(bulkClipList.children);
+  while (existing.length > clips.length) {
+    bulkClipList.removeChild(existing.pop());
+  }
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
+    let row = existing[i];
+    if (!row) {
+      row = document.createElement('li');
+      row.className = 'clip-row';
+      row.innerHTML = `
+        <span class="clip-label"></span>
+        <input class="clip-start" type="number" step="0.1" min="0" />
+        <input class="clip-end" type="number" step="0.1" min="0" />
+        <button class="clip-export-mp4 ghost small" type="button">MP4</button>
+        <button class="clip-export-mp3 ghost small" type="button">MP3</button>
+      `;
+      bulkClipList.appendChild(row);
+      const startInput = row.querySelector('.clip-start');
+      const endInput = row.querySelector('.clip-end');
+      startInput.addEventListener('change', () => {
+        const idx = Number(row.dataset.clipIndex);
+        const ok = commitClipBoundary(idx, 'start', parseFloat(startInput.value));
+        renderClipList();
+        drawBulkTimeline();
+        if (!ok) startInput.value = (markersToClips()[idx]?.start ?? 0).toFixed(1);
+      });
+      endInput.addEventListener('change', () => {
+        const idx = Number(row.dataset.clipIndex);
+        const ok = commitClipBoundary(idx, 'end', parseFloat(endInput.value));
+        renderClipList();
+        drawBulkTimeline();
+        if (!ok) endInput.value = (markersToClips()[idx]?.end ?? state.duration).toFixed(1);
+      });
+      row.querySelector('.clip-export-mp4').addEventListener('click', () => {
+        const idx = Number(row.dataset.clipIndex);
+        runSingleClipExport(markersToClips()[idx], 'mp4');
+      });
+      row.querySelector('.clip-export-mp3').addEventListener('click', () => {
+        const idx = Number(row.dataset.clipIndex);
+        runSingleClipExport(markersToClips()[idx], 'mp3');
+      });
+    }
+    row.dataset.clipIndex = String(i);
+    row.querySelector('.clip-label').textContent = clip.label;
+    const startInput = row.querySelector('.clip-start');
+    const endInput = row.querySelector('.clip-end');
+    if (document.activeElement !== startInput) startInput.value = clip.start.toFixed(1);
+    if (document.activeElement !== endInput) endInput.value = clip.end.toFixed(1);
+    startInput.disabled = i === 0;
+    endInput.disabled = i === clips.length - 1;
+  }
+}
+
+// Bulk timeline interactions
+const timelineDrag = {
+  active: false,
+  markerIndex: -1,
+  startX: 0,
+  startMarker: 0,
+};
+
+function timelineHitTest(clientX) {
+  if (!bulkTimeline || !state.duration || !state.splitMarkers.length) return -1;
+  const rect = bulkTimeline.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const tol = 8;
+  let best = -1, bestDist = Infinity;
+  for (let i = 0; i < state.splitMarkers.length; i++) {
+    const mx = (state.splitMarkers[i] / state.duration) * rect.width;
+    const dist = Math.abs(mx - x);
+    if (dist < tol && dist < bestDist) {
+      best = i;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+function timelineClientToTime(clientX) {
+  const rect = bulkTimeline.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  return ratio * state.duration;
+}
+
+if (bulkTimeline) {
+  bulkTimeline.addEventListener('pointerdown', (event) => {
+    if (!state.duration) return;
+    const idx = timelineHitTest(event.clientX);
+    if (idx >= 0) {
+      timelineDrag.active = true;
+      timelineDrag.markerIndex = idx;
+      timelineDrag.startX = event.clientX;
+      timelineDrag.startMarker = state.splitMarkers[idx];
+      bulkTimeline.setPointerCapture(event.pointerId);
+    } else {
+      // クリックで分割追加
+      const t = timelineClientToTime(event.clientX);
+      bulkAddMarkerAt(t);
+    }
+  });
+  bulkTimeline.addEventListener('pointermove', (event) => {
+    if (!timelineDrag.active) return;
+    const t = timelineClientToTime(event.clientX);
+    const prev = state.splitMarkers[timelineDrag.markerIndex - 1] ?? 0;
+    const next = state.splitMarkers[timelineDrag.markerIndex + 1] ?? state.duration;
+    const clamped = Math.min(Math.max(t, prev + MIN_GAP), next - MIN_GAP);
+    state.splitMarkers[timelineDrag.markerIndex] = clamped;
+    renderClipList();
+    drawBulkTimeline();
+  });
+  const endTimelineDrag = (event) => {
+    if (!timelineDrag.active) return;
+    timelineDrag.active = false;
+    timelineDrag.markerIndex = -1;
+    if (bulkTimeline.hasPointerCapture(event.pointerId)) {
+      bulkTimeline.releasePointerCapture(event.pointerId);
+    }
+    state.splitMarkers = sortAndDedupeMarkers(state.splitMarkers, state.duration);
+    renderClipList();
+    drawBulkTimeline();
+  };
+  bulkTimeline.addEventListener('pointerup', endTimelineDrag);
+  bulkTimeline.addEventListener('pointercancel', endTimelineDrag);
+}
+
+if (editModeButtons.length) {
+  editModeButtons.forEach((b) => {
+    b.addEventListener('click', () => setEditMode(b.dataset.editMode));
+  });
+}
+
+if (bulkAddHere) {
+  bulkAddHere.addEventListener('click', () => {
+    if (!state.duration) return;
+    bulkAddMarkerAt(video.currentTime);
+  });
+}
+if (bulkRemoveLast) {
+  bulkRemoveLast.addEventListener('click', bulkRemoveLastMarker);
+}
+if (bulkClearMarkers) {
+  bulkClearMarkers.addEventListener('click', bulkClearAllMarkers);
+}
+if (bulkAutoApply) {
+  bulkAutoApply.addEventListener('click', () => {
+    bulkAutoSplitEvery(parseFloat(bulkAutoSeconds?.value || '10'));
+  });
+}
+if (bulkExportAllMp4) {
+  bulkExportAllMp4.addEventListener('click', () => handleBulkExportClick('mp4'));
+}
+if (bulkExportAllMp3) {
+  bulkExportAllMp3.addEventListener('click', () => handleBulkExportClick('mp3'));
+}
+if (bulkExportFrames) {
+  bulkExportFrames.addEventListener('click', () => handleBulkExportClick('frame'));
+}
+
+// 個別clip書き出し（Phase 3 / Phase 4 共用）
+async function buildClipVideoVariants(clip) {
+  const cropFilter = getCropFilter();
+  const speed = getPlaybackRate();
+  const videoFilters = getTransformFilters();
+  if (cropFilter) videoFilters.push(cropFilter);
+  if (Math.abs(speed - 1) >= 0.001) {
+    videoFilters.push(`setpts=PTS/${Number(speed.toFixed(3))}`);
+  }
+  const audioFilters = [];
+  const volumeFilter = getVolumeFilter();
+  if (volumeFilter) audioFilters.push(volumeFilter);
+  audioFilters.push(...buildAtempoFilters(speed));
+  const inputName = getInputName();
+  const outputName = `clip-${clip.index}.mp4`;
+  const baseArgs = [
+    '-i', inputName,
+    '-ss', `${clip.start}`,
+    '-t', `${clip.duration}`,
+    '-map', '0:v:0',
+    '-map', '0:a:0?',
+  ];
+  if (videoFilters.length) baseArgs.push('-vf', videoFilters.join(','));
+  if (audioFilters.length) baseArgs.push('-af', audioFilters.join(','));
+  const primaryArgs = baseArgs.concat([
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputName,
+  ]);
+  const fallbackArgs = baseArgs.concat([
+    '-c:v', 'mpeg4', '-q:v', '4', '-pix_fmt', 'yuv420p',
+    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputName,
+  ]);
+  return {
+    variants: [{ args: primaryArgs }, { args: fallbackArgs }],
+    outputName,
+    outputType: 'video/mp4',
+  };
+}
+
+async function buildClipAudioVariants(clip) {
+  const speed = getPlaybackRate();
+  const audioFilters = [];
+  const volumeFilter = getVolumeFilter();
+  if (volumeFilter) audioFilters.push(volumeFilter);
+  audioFilters.push(...buildAtempoFilters(speed));
+  const bitrate = getAudioBitrate();
+  const inputName = getInputName();
+  const outputName = `clip-${clip.index}.mp3`;
+  const baseArgs = [
+    '-i', inputName,
+    '-ss', `${clip.start}`,
+    '-t', `${clip.duration}`,
+    '-vn', '-ar', '44100', '-ac', '2',
+  ];
+  if (audioFilters.length) baseArgs.push('-af', audioFilters.join(','));
+  const primaryArgs = baseArgs.concat(['-c:a', 'libmp3lame', '-b:a', bitrate, outputName]);
+  const fallbackArgs = baseArgs.concat(['-c:a', 'mp3', '-b:a', bitrate, outputName]);
+  return {
+    variants: [{ args: primaryArgs }, { args: fallbackArgs }],
+    outputName,
+    outputType: 'audio/mpeg',
+  };
+}
+
+function setProgress({ done, total, label }) {
+  state.bulkProgress = { done, total, label: label || '' };
+  if (total > 0) {
+    if (processingLabel) processingLabel.textContent = label || '処理中';
+    if (processingFill) {
+      processingFill.style.width = `${Math.min(100, (done / total) * 100)}%`;
+    }
+    if (processingCount) {
+      processingCount.textContent = `${done} / ${total}`;
+    }
+    setStatus(`${label || '処理中'} ${done} / ${total}`);
+  } else {
+    if (processingLabel) processingLabel.textContent = '処理中...';
+    if (processingFill) processingFill.style.width = '0%';
+    if (processingCount) processingCount.textContent = '';
+  }
+}
+
+// File System Access API の writable は MV3 サイドパネルで Chrome クラッシュを誘発するため無効化。
+// 一括書き出しはブラウザの通常ダウンロードで対応（Chromeのダウンロード設定で保存先を指定可）。
+async function writeBlobToDirOrDownload(_dirHandle, filename, blob) {
+  downloadBlob(blob, filename);
+}
+
+// frame draw 可能状態を待つ（loadedmetadata 後でも readyState 不足時がある）
+function waitVideoReady(videoEl) {
+  if (videoEl.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      videoEl.removeEventListener('loadeddata', onReady);
+      videoEl.removeEventListener('canplay', onReady);
+    };
+    const onReady = () => { cleanup(); resolve(); };
+    videoEl.addEventListener('loadeddata', onReady, { once: true });
+    videoEl.addEventListener('canplay', onReady, { once: true });
+    setTimeout(() => { cleanup(); resolve(); }, 3000);
+  });
+}
+
+async function seekVideoTo(videoEl, target) {
+  // 既に近い位置にいればフレーム準備状態だけ待つ
+  if (Math.abs(videoEl.currentTime - target) < 0.001) {
+    await waitVideoReady(videoEl);
+    return;
+  }
+  await new Promise((resolve) => {
+    const onDone = () => {
+      videoEl.removeEventListener('seeked', onDone);
+      videoEl.removeEventListener('loadeddata', onDone);
+      resolve();
+    };
+    videoEl.addEventListener('seeked', onDone, { once: true });
+    videoEl.addEventListener('loadeddata', onDone, { once: true });
+    try { videoEl.currentTime = target; }
+    catch (error) { videoEl.removeEventListener('seeked', onDone); resolve(); }
+    setTimeout(onDone, 3000);
+  });
+}
+
+// 一括フレーム抽出: FFmpeg WASM だと clip 数だけフル decode が走り Chrome がクラッシュしやすい。
+// canvas+オフスクリーン video の seek 経路に切り替えて軽量化（サムネ生成と同じ仕組み）。
+async function exportClipFramesViaCanvas(clips, dirHandle, onProgress) {
+  const offscreen = document.createElement('video');
+  offscreen.muted = true;
+  offscreen.preload = 'auto';
+  offscreen.crossOrigin = 'anonymous';
+  try {
+    offscreen.src = state.objectUrl;
+    await new Promise((resolve, reject) => {
+      offscreen.addEventListener('loadedmetadata', resolve, { once: true });
+      offscreen.addEventListener('error', reject, { once: true });
+      setTimeout(() => reject(new Error('動画メタデータの読み込みに失敗しました。')), 5000);
+    });
+    await waitVideoReady(offscreen);
+    const srcW = offscreen.videoWidth;
+    const srcH = offscreen.videoHeight;
+    if (!srcW || !srcH) throw new Error('動画の解像度を取得できませんでした。');
+    const display = state.transform.rotation % 180 === 0
+      ? { width: srcW, height: srcH }
+      : { width: srcH, height: srcW };
+    const crop = clampCropRect(state.crop);
+    const useCrop = crop.width > 0 && crop.height > 0
+      && !(crop.x === 0 && crop.y === 0 && crop.width === display.width && crop.height === display.height);
+    const frameCanvas = document.createElement('canvas');
+    frameCanvas.width = display.width;
+    frameCanvas.height = display.height;
+    const frameCtx = frameCanvas.getContext('2d');
+    const outCanvas = document.createElement('canvas');
+    const outCtx = outCanvas.getContext('2d');
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
+      const target = Math.min(state.duration - 0.05, Math.max(0, clip.start));
+      await seekVideoTo(offscreen, target);
+      // transform 適用してフルフレームへ
+      frameCtx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
+      drawTransformedSource(frameCtx, offscreen, srcW, srcH, frameCanvas.width, frameCanvas.height);
+      // crop 適用
+      if (useCrop) {
+        outCanvas.width = Math.max(1, Math.round(crop.width));
+        outCanvas.height = Math.max(1, Math.round(crop.height));
+        outCtx.drawImage(frameCanvas, crop.x, crop.y, crop.width, crop.height,
+          0, 0, outCanvas.width, outCanvas.height);
+      } else {
+        outCanvas.width = frameCanvas.width;
+        outCanvas.height = frameCanvas.height;
+        outCtx.drawImage(frameCanvas, 0, 0);
+      }
+      const blob = await new Promise((resolve) => outCanvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error(`${clip.label} のPNG化に失敗しました。`);
+      const filename = `${baseName()}-${clip.label}-firstframe.png`;
+      await writeBlobToDirOrDownload(dirHandle, filename, blob);
+      onProgress(i + 1);
+      await new Promise((r) => setTimeout(r, 30));
+    }
+  } finally {
+    offscreen.removeAttribute('src');
+    offscreen.load();
+  }
+}
+
+async function runBulkExport(kind, dirHandle) {
+  if (state.mediaType !== MEDIA_VIDEO && kind !== 'mp3') {
+    setStatus('動画ファイルのみ対応です。');
+    return;
+  }
+  const clips = markersToClips();
+  if (!clips.length) {
+    setStatus('クリップがありません。');
+    return;
+  }
+  setProcessing(true);
+  try {
+    setProgress({ done: 0, total: clips.length, label: '一括書き出し中' });
+    if (kind === 'frame') {
+      // canvas経路（軽量、Chromeクラッシュ回避）
+      await exportClipFramesViaCanvas(clips, dirHandle, (done) => {
+        setProgress({ done, total: clips.length, label: '一括書き出し中' });
+      });
+      setStatus(`${clips.length} 枚のフレームを書き出しました。`);
+      return;
+    }
+    const items = [];
+    for (const c of clips) {
+      if (kind === 'mp3') items.push(await buildClipAudioVariants(c));
+      else items.push(await buildClipVideoVariants(c));
+    }
+    const ext = kind === 'mp3' ? 'mp3' : 'mp4';
+    await runFfmpegBatch(items, {
+      onItemDone: async (_item, blob, i) => {
+        const clip = clips[i];
+        const filename = `${baseName()}-${clip.label}.${ext}`;
+        await writeBlobToDirOrDownload(dirHandle, filename, blob);
+        setProgress({ done: i + 1, total: clips.length, label: '一括書き出し中' });
+      },
+    });
+    setStatus(`${clips.length} 個のファイルを書き出しました。`);
+  } catch (error) {
+    setStatus(error.message || '一括書き出しに失敗しました。');
+  } finally {
+    setProgress({ done: 0, total: 0 });
+    setProcessing(false);
+  }
+}
+
+async function handleBulkExportClick(kind) {
+  if (!state.duration) {
+    setStatus('先に動画ファイルを読み込んでください。');
+    return;
+  }
+  await runBulkExport(kind, null);
+}
+
+async function runSingleClipExport(clip, kind) {
+  if (!clip) return;
+  if (state.mediaType !== MEDIA_VIDEO && kind !== 'mp3') {
+    setStatus('動画ファイルのみ対応です。');
+    return;
+  }
+  setProcessing(true);
+  try {
+    setStatus(`${clip.label} を ${kind.toUpperCase()} で書き出し中...`);
+    const item = kind === 'mp3'
+      ? await buildClipAudioVariants(clip)
+      : await buildClipVideoVariants(clip);
+    let resultBlob = null;
+    await runFfmpegBatch([item], { onItemDone: (_i, b) => { resultBlob = b; } });
+    const ext = kind === 'mp3' ? 'mp3' : 'mp4';
+    downloadBlob(resultBlob, `${baseName()}-${clip.label}.${ext}`);
+    setStatus(`${clip.label} の書き出しが完了しました。`);
+  } catch (error) {
+    setStatus(error.message || '書き出しに失敗しました。');
+  } finally {
+    setProcessing(false);
+  }
+}
+
 // Crop interactions
 const cropDrag = {
   active: false,
-  mode: null,
+  handle: null,
   startX: 0,
   startY: 0,
   startRect: null,
@@ -1207,7 +2303,7 @@ const cropDrag = {
   scaleY: 1,
 };
 
-function startCropDrag(event, mode) {
+function startCropDrag(event, handle) {
   if (!state.duration) {
     return;
   }
@@ -1217,7 +2313,7 @@ function startCropDrag(event, mode) {
     return;
   }
   cropDrag.active = true;
-  cropDrag.mode = mode;
+  cropDrag.handle = handle;
   cropDrag.startX = event.clientX;
   cropDrag.startY = event.clientY;
   cropDrag.startRect = { ...state.crop };
@@ -1235,30 +2331,15 @@ function updateCropDrag(event) {
   }
   const dx = (event.clientX - cropDrag.startX) / cropDrag.scaleX;
   const dy = (event.clientY - cropDrag.startY) / cropDrag.scaleY;
-  if (cropDrag.mode === 'resize-br') {
-    setCropRect({
-      x: cropDrag.startRect.x,
-      y: cropDrag.startRect.y,
-      width: cropDrag.startRect.width + dx,
-      height: cropDrag.startRect.height + dy,
-    });
-    return;
-  }
-  if (cropDrag.mode === 'resize-tl') {
-    setCropRect({
-      x: cropDrag.startRect.x + dx,
-      y: cropDrag.startRect.y + dy,
-      width: cropDrag.startRect.width - dx,
-      height: cropDrag.startRect.height - dy,
-    });
-    return;
+  let next = applyHandleDelta(cropDrag.startRect, cropDrag.handle, dx, dy);
+  const ratio = getActiveAspectRatio();
+  if (ratio && cropDrag.handle !== 'move') {
+    const bounds = getDisplaySize();
+    next = fitAspectFromAnchor(next, cropDrag.handle, ratio, bounds);
+    next = clampPreservingAspect(next, cropDrag.handle, ratio, bounds);
+    setCropRectRaw(next);
   } else {
-    setCropRect({
-      x: cropDrag.startRect.x + dx,
-      y: cropDrag.startRect.y + dy,
-      width: cropDrag.startRect.width,
-      height: cropDrag.startRect.height,
-    });
+    setCropRect(next);
   }
 }
 
@@ -1267,7 +2348,7 @@ function endCropDrag(event) {
     return;
   }
   cropDrag.active = false;
-  cropDrag.mode = null;
+  cropDrag.handle = null;
   cropDrag.startRect = null;
   if (cropBox && cropBox.hasPointerCapture(event.pointerId)) {
     cropBox.releasePointerCapture(event.pointerId);
@@ -1275,35 +2356,47 @@ function endCropDrag(event) {
 }
 
 // Event wiring
-if (cropHandle) {
-  cropHandle.addEventListener('pointerdown', (event) => {
-    event.stopPropagation();
-    startCropDrag(event, 'resize-br');
-  });
-}
-
-if (cropHandleTL) {
-  cropHandleTL.addEventListener('pointerdown', (event) => {
-    event.stopPropagation();
-    startCropDrag(event, 'resize-tl');
-  });
-}
-
 if (cropBox) {
   cropBox.addEventListener('pointerdown', (event) => {
-    if (event.target === cropHandle || event.target === cropHandleTL) {
-      return;
+    const handle = event.target?.dataset?.handle;
+    if (handle && HANDLE_SPEC[handle]) {
+      event.stopPropagation();
+      startCropDrag(event, handle);
+    } else {
+      startCropDrag(event, 'move');
     }
-    startCropDrag(event, 'move');
   });
   cropBox.addEventListener('pointermove', updateCropDrag);
   cropBox.addEventListener('pointerup', endCropDrag);
   cropBox.addEventListener('pointercancel', endCropDrag);
 }
 
-if (pickFile) {
-  pickFile.addEventListener('click', () => fileInput.click());
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Shift') state.shiftHeld = true;
+});
+window.addEventListener('keyup', (event) => {
+  if (event.key === 'Shift') state.shiftHeld = false;
+});
+window.addEventListener('blur', () => { state.shiftHeld = false; });
+
+if (aspectButtons.length) {
+  aspectButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const aspect = button.dataset.aspect;
+      if (!aspect || !(aspect in ASPECT_RATIOS)) return;
+      state.aspect = aspect;
+      syncAspectButtons();
+      const ratio = ASPECT_RATIOS[aspect];
+      if (ratio && state.duration && state.crop.width && state.crop.height) {
+        const bounds = getDisplaySize();
+        const fitted = fitAspectCentered(state.crop, ratio, bounds);
+        setCropRectRaw(fitted);
+        drawFrame();
+      }
+    });
+  });
 }
+
 if (clearVideo) {
   clearVideo.addEventListener('click', clearVideoState);
 }
@@ -1334,6 +2427,7 @@ dropzone.addEventListener('drop', (event) => {
 window.addEventListener('resize', () => {
   updateCropBox();
   updatePreviewLayout();
+  if (state.uiMode === UI_MODE_BULK) drawBulkTimeline();
 });
 
 video.addEventListener('loadedmetadata', () => {
@@ -1341,6 +2435,8 @@ video.addEventListener('loadedmetadata', () => {
   startTimeInput.value = '0.0';
   endTimeInput.value = state.duration.toFixed(1);
   updateInfo();
+  applyTrimRangeMax();
+  syncTrimFromInputs();
   if (state.mediaType === MEDIA_VIDEO) {
     setCropFull();
     drawFrame();
@@ -1349,6 +2445,7 @@ video.addEventListener('loadedmetadata', () => {
     applyPlaybackRate(state.playbackRate);
     applyVolume(state.volume * 100);
     applyVideoTransform();
+    generateTrimThumbnails();
   } else {
     clearPreviewCanvas();
     updatePreviewLayout();
@@ -1356,9 +2453,14 @@ video.addEventListener('loadedmetadata', () => {
     state.volume = DEFAULT_VOLUME;
     applyVolume(DEFAULT_VOLUME * 100);
     video.style.transform = 'none';
+    clearTrimThumbnails();
   }
   setButtonsEnabled(true);
   updateTransformUI();
+  if (state.uiMode === UI_MODE_BULK) {
+    renderClipList();
+    drawBulkTimeline();
+  }
 });
 
 video.addEventListener('play', startRenderLoop);
@@ -1373,16 +2475,19 @@ video.addEventListener('timeupdate', () => {
   if (state.duration) {
     durationEl.textContent = `${formatTime(video.currentTime)} / ${formatTime(state.duration)}`;
   }
+  if (state.uiMode === UI_MODE_BULK) drawBulkTimeline();
 });
 
 setStartBtn.addEventListener('click', () => {
   startTimeInput.value = video.currentTime.toFixed(1);
   sanitizeTimes();
+  syncTrimFromInputs();
 });
 
 setEndBtn.addEventListener('click', () => {
   endTimeInput.value = video.currentTime.toFixed(1);
   sanitizeTimes();
+  syncTrimFromInputs();
 });
 
 useSourceBtn.addEventListener('click', () => {
@@ -1395,8 +2500,26 @@ useSourceBtn.addEventListener('click', () => {
 [startTimeInput, endTimeInput].forEach((input) => {
   input.addEventListener('change', () => {
     sanitizeTimes();
+    syncTrimFromInputs();
   });
 });
+
+if (trimStartRange) {
+  trimStartRange.addEventListener('input', () => syncTrimFromRange('start'));
+  trimStartRange.addEventListener('pointerdown', () => {
+    trimStartRange.classList.remove('is-front');
+    if (trimEndRange) trimEndRange.classList.remove('is-front');
+    if (video && !video.paused) video.pause();
+  });
+}
+if (trimEndRange) {
+  trimEndRange.addEventListener('input', () => syncTrimFromRange('end'));
+  trimEndRange.addEventListener('pointerdown', () => {
+    if (trimStartRange) trimStartRange.classList.remove('is-front');
+    trimEndRange.classList.add('is-front');
+    if (video && !video.paused) video.pause();
+  });
+}
 
 [outWidthInput, outHeightInput].forEach((input) => {
   input.addEventListener('change', () => {
@@ -1537,6 +2660,9 @@ setButtonsEnabled(false);
 updateInfo();
 updateCropBox();
 updateCropSizeLabel();
+applyTrimRangeMax();
+updateTrimRangeFill();
+updateTrimLabels();
 if (clearVideo) {
   clearVideo.disabled = true;
 }
@@ -1546,4 +2672,5 @@ applyVolume(DEFAULT_VOLUME * 100);
 applyVideoTransform();
 updateTransformUI();
 setUIMode(loadUIMode());
+setEditMode(UI_MODE_NORMAL);
 setStatus('動画/音声をドロップして開始してください。');
