@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "SILVA EDIT",
-  "version": "1.4.0",
-  "description": "サイドパネルで動画/音声を簡単にトリミング・書き出し（テーマ切替・再生速度・回転/反転・音量調整対応）。",
+  "version": "1.5.0",
+  "description": "サイドパネルで動画/音声を簡単にトリミング・書き出し（まとめて画像保存・音を両耳にする・分割書き出し対応）。",
   "permissions": ["sidePanel"],
   "action": {
     "default_title": "SILVA EDIT",

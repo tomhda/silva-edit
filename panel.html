@@ -8,6 +8,8 @@
   </head>
   <body>
     <input id="fileInput" type="file" accept="video/*,audio/*" hidden />
+    <input id="batchFrameInput" type="file" accept="video/*" multiple hidden />
+    <input id="batchAudioInput" type="file" accept="video/*,audio/*" multiple hidden />
 
     <section class="info compact">
       <div class="info-card">
@@ -25,6 +27,7 @@
       <div class="edit-mode-switch" role="group" aria-label="編集モード">
         <button class="edit-mode-btn active" type="button" data-edit-mode="normal" aria-pressed="true">通常編集</button>
         <button class="edit-mode-btn" type="button" data-edit-mode="bulk" aria-pressed="false">一括分割</button>
+        <button class="edit-mode-btn" type="button" data-edit-mode="batch" aria-pressed="false">一括処理</button>
       </div>
     </section>
 
@@ -133,6 +136,14 @@
           <input id="volume" type="range" min="0" max="200" step="5" value="100" />
           <span id="volumeValue" class="rate-unit">100%</span>
         </div>
+        <div class="row channel-row">
+          <label for="audioChannelMode">音を両耳にする</label>
+          <select id="audioChannelMode">
+            <option value="none" selected>なし</option>
+            <option value="left-to-stereo">左の音を両方へ</option>
+            <option value="right-to-stereo">右の音を両方へ</option>
+          </select>
+        </div>
       </div>
 
       <div class="control-block crop">
@@ -238,6 +249,56 @@
       <div class="control-block bulk-list-block">
         <div class="block-title">分割リスト</div>
         <ul id="bulkClipList" class="bulk-clip-list"></ul>
+      </div>
+    </section>
+
+    <section class="batch-panel" id="batchPanel">
+      <div class="control-block batch-tool batch-tool-frame">
+        <div class="batch-tool-head">
+          <div class="block-title">まとめて画像保存 <span id="batchFrameCount" class="clip-count">0 件</span></div>
+          <div class="batch-tool-copy">複数の動画用。同じ秒の画面を、まとめて画像にします。</div>
+        </div>
+        <button
+          id="batchFrameChoose"
+          class="batch-drop-target"
+          data-batch-drop="frame"
+          type="button"
+          aria-label="まとめて画像保存する動画を選択"
+        >
+          <span class="batch-drop-mark">＋</span>
+          <span class="batch-drop-note">MP4 / WebM / MOV / OGV / MKV</span>
+          <span id="batchFrameSummary" class="batch-summary">未選択</span>
+        </button>
+        <div class="batch-action-row">
+          <label for="batchFrameSecond">秒位置</label>
+          <input id="batchFrameSecond" type="number" min="0" step="0.1" value="1.0" />
+          <button id="batchFrameExport" class="primary small" type="button">一括保存</button>
+        </div>
+      </div>
+      <div class="control-block batch-tool batch-tool-audio">
+        <div class="batch-tool-head">
+          <div class="block-title">音を両耳にする <span id="batchAudioCount" class="clip-count">0 件</span></div>
+          <div class="batch-tool-copy">左だけ/右だけに寄った音を、左右どちらからも聞けるようにします。</div>
+        </div>
+        <button
+          id="batchAudioChoose"
+          class="batch-drop-target"
+          data-batch-drop="audio"
+          type="button"
+          aria-label="音を両耳にする動画または音声を選択"
+        >
+          <span class="batch-drop-mark">＋</span>
+          <span class="batch-drop-note">MP4 / WebM / MOV / MP3 / WAV / M4A / Ogg</span>
+          <span id="batchAudioSummary" class="batch-summary">未選択</span>
+        </button>
+        <div class="batch-action-row">
+          <label for="batchAudioChannelMode">元の音</label>
+          <select id="batchAudioChannelMode">
+            <option value="left-to-stereo" selected>左の音を両方へ</option>
+            <option value="right-to-stereo">右の音を両方へ</option>
+          </select>
+          <button id="batchAudioExport" class="primary small" type="button">一括保存</button>
+        </div>
       </div>
     </section>
 

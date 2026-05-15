@@ -1,6 +1,8 @@
 // DOM
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
+const batchFrameInput = document.getElementById('batchFrameInput');
+const batchAudioInput = document.getElementById('batchAudioInput');
 const fileNameEl = document.getElementById('fileName');
 const durationEl = document.getElementById('duration');
 const sourceSizeEl = document.getElementById('sourceSize');
@@ -21,6 +23,16 @@ const bulkAutoApply = document.getElementById('bulkAutoApply');
 const bulkExportAllMp4 = document.getElementById('bulkExportAllMp4');
 const bulkExportAllMp3 = document.getElementById('bulkExportAllMp3');
 const bulkExportFrames = document.getElementById('bulkExportFrames');
+const batchFrameChoose = document.getElementById('batchFrameChoose');
+const batchFrameSecond = document.getElementById('batchFrameSecond');
+const batchFrameExport = document.getElementById('batchFrameExport');
+const batchFrameCount = document.getElementById('batchFrameCount');
+const batchFrameSummary = document.getElementById('batchFrameSummary');
+const batchAudioChoose = document.getElementById('batchAudioChoose');
+const batchAudioChannelSelect = document.getElementById('batchAudioChannelMode');
+const batchAudioExport = document.getElementById('batchAudioExport');
+const batchAudioCount = document.getElementById('batchAudioCount');
+const batchAudioSummary = document.getElementById('batchAudioSummary');
 const processingOverlay = document.getElementById('processingOverlay');
 const processingLabel = document.getElementById('processingLabel');
 const processingFill = document.getElementById('processingFill');
@@ -47,6 +59,7 @@ const exportAudioBtn = document.getElementById('exportAudio');
 const logEl = document.getElementById('log');
 const playbackRateInput = document.getElementById('playbackRate');
 const audioQualitySelect = document.getElementById('audioQuality');
+const audioChannelSelect = document.getElementById('audioChannelMode');
 const volumeInput = document.getElementById('volume');
 const volumeValue = document.getElementById('volumeValue');
 const rotateLeftBtn = document.getElementById('rotateLeft');
@@ -66,6 +79,7 @@ const state = {
   renderHandle: null,
   playbackRate: 1,
   volume: 1,
+  audioChannelMode: 'none',
   transform: {
     rotation: 0,
     flipH: false,
@@ -82,6 +96,8 @@ const state = {
   thumbnails: { generated: false, duration: 0, rotation: 0, generation: 0 },
   uiMode: 'normal',
   splitMarkers: [],
+  batchFrameFiles: [],
+  batchAudioFiles: [],
   bulkProgress: { total: 0, done: 0, label: '' },
 };
 
@@ -114,6 +130,15 @@ const MODE_KIRI = 'kiri';
 const MIN_GAP = 0.05;
 const UI_MODE_NORMAL = 'normal';
 const UI_MODE_BULK = 'bulk';
+const UI_MODE_BATCH = 'batch';
+const CHANNEL_MODE_NONE = 'none';
+const CHANNEL_MODE_LEFT_TO_STEREO = 'left-to-stereo';
+const CHANNEL_MODE_RIGHT_TO_STEREO = 'right-to-stereo';
+const BATCH_FRAME_MAX_FILES = 60;
+const BATCH_AUDIO_MAX_FILES = 60;
+const BATCH_MAX_TOTAL_BYTES = 8 * 1024 * 1024 * 1024;
+const BATCH_AUDIO_MAX_FILE_BYTES = 1536 * 1024 * 1024;
+const BATCH_FRAME_MAX_PIXELS = 33_000_000;
 
 // UI state
 function setStatus(message) {
@@ -152,6 +177,20 @@ function setMediaMode(type) {
   document.body.classList.toggle('media-video', type === MEDIA_VIDEO);
 }
 
+function setBatchButtonsEnabled() {
+  const processing = isProcessing();
+  if (batchFrameChoose) batchFrameChoose.disabled = processing;
+  if (batchFrameSecond) batchFrameSecond.disabled = processing;
+  if (batchFrameExport) {
+    batchFrameExport.disabled = processing || state.batchFrameFiles.length === 0;
+  }
+  if (batchAudioChoose) batchAudioChoose.disabled = processing;
+  if (batchAudioChannelSelect) batchAudioChannelSelect.disabled = processing;
+  if (batchAudioExport) {
+    batchAudioExport.disabled = processing || state.batchAudioFiles.length === 0;
+  }
+}
+
 function setButtonsEnabled(enabled) {
   const isAudio = state.mediaType === MEDIA_AUDIO;
   exportVideoBtn.disabled = !enabled || isAudio;
@@ -172,7 +211,10 @@ function setButtonsEnabled(enabled) {
   if (bulkExportAllMp3) bulkExportAllMp3.disabled = !enabled;
   if (bulkExportFrames) bulkExportFrames.disabled = !enabled || isAudio;
   aspectButtons.forEach((b) => { b.disabled = !enabled || isAudio; });
-  editModeButtons.forEach((b) => { b.disabled = !enabled || isAudio; });
+  editModeButtons.forEach((b) => {
+    const mode = b.dataset.editMode;
+    b.disabled = isProcessing() || (mode === UI_MODE_BULK ? (!enabled || isAudio) : false);
+  });
   if (rotateLeftBtn) {
     rotateLeftBtn.disabled = !enabled || isAudio;
   }
@@ -191,6 +233,9 @@ function setButtonsEnabled(enabled) {
   if (audioQualitySelect) {
     audioQualitySelect.disabled = !enabled;
   }
+  if (audioChannelSelect) {
+    audioChannelSelect.disabled = !enabled;
+  }
   if (volumeInput) {
     volumeInput.disabled = !enabled || isAudio;
   }
@@ -200,6 +245,7 @@ function setButtonsEnabled(enabled) {
   if (outHeightInput) {
     outHeightInput.disabled = !enabled || isAudio;
   }
+  setBatchButtonsEnabled();
 }
 
 function setProcessing(processing) {
@@ -246,6 +292,13 @@ function baseName() {
   return state.fileName.replace(/\.[^.]+$/, '');
 }
 
+function baseNameFromFile(fileName) {
+  if (!fileName) {
+    return 'export';
+  }
+  return fileName.replace(/\.[^.]+$/, '') || 'export';
+}
+
 function formatStamp(seconds) {
   return seconds.toFixed(1).replace('.', 'p');
 }
@@ -256,6 +309,21 @@ function formatClipLabel(start, end) {
 
 function getMediaLabel(type = state.mediaType) {
   return type === MEDIA_AUDIO ? '音声' : '動画';
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  const digits = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
 }
 
 function getFileExtension(fileName) {
@@ -355,6 +423,47 @@ function getVolumeFilter() {
     return null;
   }
   return `volume=${volume.toFixed(2)}`;
+}
+
+function sanitizeAudioChannelMode(mode) {
+  if (mode === CHANNEL_MODE_LEFT_TO_STEREO || mode === CHANNEL_MODE_RIGHT_TO_STEREO) {
+    return mode;
+  }
+  return CHANNEL_MODE_NONE;
+}
+
+function setAudioChannelMode(mode) {
+  state.audioChannelMode = sanitizeAudioChannelMode(mode);
+  if (audioChannelSelect) {
+    audioChannelSelect.value = state.audioChannelMode;
+  }
+}
+
+function getAudioChannelFilter(mode = state.audioChannelMode) {
+  const channelMode = sanitizeAudioChannelMode(mode);
+  if (channelMode === CHANNEL_MODE_LEFT_TO_STEREO) {
+    return 'pan=stereo|c0=c0|c1=c0';
+  }
+  if (channelMode === CHANNEL_MODE_RIGHT_TO_STEREO) {
+    return 'pan=stereo|c0=c1|c1=c1';
+  }
+  return null;
+}
+
+function buildAudioFilters({ includeVolume = true, speed = 1, channelMode = state.audioChannelMode } = {}) {
+  const filters = [];
+  const channelFilter = getAudioChannelFilter(channelMode);
+  if (channelFilter) {
+    filters.push(channelFilter);
+  }
+  if (includeVolume) {
+    const volumeFilter = getVolumeFilter();
+    if (volumeFilter) {
+      filters.push(volumeFilter);
+    }
+  }
+  filters.push(...buildAtempoFilters(speed));
+  return filters;
 }
 
 // Trim scrubber (dual range + thumbnail strip)
@@ -1135,6 +1244,22 @@ function stopRenderLoop() {
 
 // Metadata
 function updateInfo() {
+  if (state.uiMode === UI_MODE_BATCH) {
+    const frameCount = state.batchFrameFiles.length;
+    const audioCount = state.batchAudioFiles.length;
+    const total = [...state.batchFrameFiles, ...state.batchAudioFiles]
+      .reduce((sum, file) => sum + file.size, 0);
+    fileNameEl.textContent = `一括処理 ${frameCount + audioCount} 件`;
+    durationEl.textContent = formatBytes(total);
+    sourceSizeEl.textContent = frameCount && audioCount
+      ? '画像/両耳'
+      : frameCount
+        ? 'まとめ画像'
+        : audioCount
+          ? '両耳化'
+          : '--';
+    return;
+  }
   fileNameEl.textContent = state.fileName || '未選択';
   durationEl.textContent = state.duration ? formatTime(state.duration) : '--';
   if (video.videoWidth && video.videoHeight) {
@@ -1142,6 +1267,100 @@ function updateInfo() {
   } else {
     sourceSizeEl.textContent = '--';
   }
+}
+
+function summarizeFiles(files) {
+  if (!files.length) {
+    return '未選択';
+  }
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  const firstNames = files.slice(0, 3).map((file) => file.name).join(' / ');
+  const rest = files.length > 3 ? ` ほか ${files.length - 3} 件` : '';
+  return `${files.length} 件・${formatBytes(totalBytes)}｜${firstNames}${rest}`;
+}
+
+function validateBatchSelection(files, { maxFiles, maxFileBytes = 0, allowedMediaTypes }) {
+  const picked = Array.from(files || []);
+  const accepted = [];
+  const skipped = [];
+  for (const file of picked) {
+    const mediaType = detectMediaType(file);
+    if (allowedMediaTypes.includes(mediaType)) {
+      accepted.push(file);
+    } else {
+      skipped.push(file.name);
+    }
+  }
+  if (accepted.length > maxFiles) {
+    throw new Error(`一度に処理できるのは ${maxFiles} 件までです。`);
+  }
+  if (maxFileBytes > 0) {
+    const oversized = accepted.find((file) => file.size > maxFileBytes);
+    if (oversized) {
+      throw new Error(`${oversized.name} が ${formatBytes(maxFileBytes)} を超えています。`);
+    }
+  }
+  const totalBytes = accepted.reduce((sum, file) => sum + file.size, 0);
+  if (totalBytes > BATCH_MAX_TOTAL_BYTES) {
+    throw new Error(`合計容量は ${formatBytes(BATCH_MAX_TOTAL_BYTES)} までにしてください。`);
+  }
+  return { accepted, skipped };
+}
+
+function setBatchFrameFiles(files) {
+  try {
+    const { accepted, skipped } = validateBatchSelection(files, {
+      maxFiles: BATCH_FRAME_MAX_FILES,
+      allowedMediaTypes: [MEDIA_VIDEO],
+    });
+    state.batchFrameFiles = accepted;
+    if (skipped.length) {
+      setStatus(`${skipped.length} 件は動画ではないため除外しました。`);
+    } else if (accepted.length) {
+      setStatus(`${accepted.length} 件の動画を選択しました。`);
+    }
+  } catch (error) {
+    state.batchFrameFiles = [];
+    setStatus(error.message || 'ファイルを選択できませんでした。');
+  }
+  updateBatchSummaries();
+}
+
+function setBatchAudioFiles(files) {
+  try {
+    const { accepted, skipped } = validateBatchSelection(files, {
+      maxFiles: BATCH_AUDIO_MAX_FILES,
+      maxFileBytes: BATCH_AUDIO_MAX_FILE_BYTES,
+      allowedMediaTypes: [MEDIA_VIDEO, MEDIA_AUDIO],
+    });
+    state.batchAudioFiles = accepted;
+    if (skipped.length) {
+      setStatus(`${skipped.length} 件は動画/音声ではないため除外しました。`);
+    } else if (accepted.length) {
+      setStatus(`${accepted.length} 件の動画/音声を選択しました。`);
+    }
+  } catch (error) {
+    state.batchAudioFiles = [];
+    setStatus(error.message || 'ファイルを選択できませんでした。');
+  }
+  updateBatchSummaries();
+}
+
+function updateBatchSummaries() {
+  if (batchFrameCount) {
+    batchFrameCount.textContent = `${state.batchFrameFiles.length} 件`;
+  }
+  if (batchFrameSummary) {
+    batchFrameSummary.textContent = summarizeFiles(state.batchFrameFiles);
+  }
+  if (batchAudioCount) {
+    batchAudioCount.textContent = `${state.batchAudioFiles.length} 件`;
+  }
+  if (batchAudioSummary) {
+    batchAudioSummary.textContent = summarizeFiles(state.batchAudioFiles);
+  }
+  setBatchButtonsEnabled();
+  updateInfo();
 }
 
 function revokeObjectUrl() {
@@ -1460,12 +1679,7 @@ async function exportVideoWithFfmpeg() {
   if (Math.abs(speed - 1) >= 0.001) {
     videoFilters.push(`setpts=PTS/${Number(speed.toFixed(3))}`);
   }
-  const audioFilters = [];
-  const volumeFilter = getVolumeFilter();
-  if (volumeFilter) {
-    audioFilters.push(volumeFilter);
-  }
-  audioFilters.push(...buildAtempoFilters(speed));
+  const audioFilters = buildAudioFilters({ speed });
   const inputName = getInputName();
   const outputName = 'output.mp4';
   const baseArgs = [
@@ -1532,12 +1746,7 @@ async function exportAudioWithFfmpeg() {
   const { start, end } = sanitizeTimes();
   const duration = Math.max(0.1, end - start);
   const speed = getPlaybackRate();
-  const audioFilters = [];
-  const volumeFilter = getVolumeFilter();
-  if (volumeFilter) {
-    audioFilters.push(volumeFilter);
-  }
-  audioFilters.push(...buildAtempoFilters(speed));
+  const audioFilters = buildAudioFilters({ speed });
   const bitrate = getAudioBitrate();
   const inputName = getInputName();
   const outputName = 'audio.mp3';
@@ -1698,9 +1907,16 @@ async function exportFrameFullFromCanvas() {
 
 // Bulk split mode
 function setEditMode(mode) {
-  const target = mode === UI_MODE_BULK ? UI_MODE_BULK : UI_MODE_NORMAL;
+  let target = mode === UI_MODE_BULK ? UI_MODE_BULK : UI_MODE_NORMAL;
+  if (mode === UI_MODE_BATCH) {
+    target = UI_MODE_BATCH;
+  }
+  if (target === UI_MODE_BULK && state.mediaType !== MEDIA_VIDEO) {
+    target = UI_MODE_NORMAL;
+  }
   state.uiMode = target;
   document.body.classList.toggle('mode-bulk', target === UI_MODE_BULK);
+  document.body.classList.toggle('mode-batch', target === UI_MODE_BATCH);
   editModeButtons.forEach((b) => {
     const isActive = b.dataset.editMode === target;
     b.classList.toggle('active', isActive);
@@ -1710,6 +1926,8 @@ function setEditMode(mode) {
     renderClipList();
     drawBulkTimeline();
   }
+  updateInfo();
+  setBatchButtonsEnabled();
 }
 
 function sortAndDedupeMarkers(markers, duration) {
@@ -2041,10 +2259,7 @@ async function buildClipVideoVariants(clip) {
   if (Math.abs(speed - 1) >= 0.001) {
     videoFilters.push(`setpts=PTS/${Number(speed.toFixed(3))}`);
   }
-  const audioFilters = [];
-  const volumeFilter = getVolumeFilter();
-  if (volumeFilter) audioFilters.push(volumeFilter);
-  audioFilters.push(...buildAtempoFilters(speed));
+  const audioFilters = buildAudioFilters({ speed });
   const inputName = getInputName();
   const outputName = `clip-${clip.index}.mp4`;
   const baseArgs = [
@@ -2073,10 +2288,7 @@ async function buildClipVideoVariants(clip) {
 
 async function buildClipAudioVariants(clip) {
   const speed = getPlaybackRate();
-  const audioFilters = [];
-  const volumeFilter = getVolumeFilter();
-  if (volumeFilter) audioFilters.push(volumeFilter);
-  audioFilters.push(...buildAtempoFilters(speed));
+  const audioFilters = buildAudioFilters({ speed });
   const bitrate = getAudioBitrate();
   const inputName = getInputName();
   const outputName = `clip-${clip.index}.mp3`;
@@ -2213,6 +2425,260 @@ async function exportClipFramesViaCanvas(clips, dirHandle, onProgress) {
   } finally {
     offscreen.removeAttribute('src');
     offscreen.load();
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function captureFrameFromFile(file, seconds) {
+  const objectUrl = URL.createObjectURL(file);
+  const offscreen = document.createElement('video');
+  const canvas = document.createElement('canvas');
+  try {
+    offscreen.muted = true;
+    offscreen.preload = 'auto';
+    offscreen.src = objectUrl;
+    await new Promise((resolve, reject) => {
+      offscreen.addEventListener('loadedmetadata', resolve, { once: true });
+      offscreen.addEventListener('error', reject, { once: true });
+      setTimeout(() => reject(new Error('動画メタデータの読み込みに失敗しました。')), 8000);
+    });
+    await waitVideoReady(offscreen);
+    const width = offscreen.videoWidth;
+    const height = offscreen.videoHeight;
+    if (!width || !height) {
+      throw new Error('動画の解像度を取得できませんでした。');
+    }
+    if (width * height > BATCH_FRAME_MAX_PIXELS) {
+      throw new Error(`解像度が大きすぎます（上限 ${BATCH_FRAME_MAX_PIXELS.toLocaleString()} px）。`);
+    }
+    const duration = Number.isFinite(offscreen.duration) ? offscreen.duration : 0;
+    const safeDurationEnd = Math.max(0, duration - 0.05);
+    const target = Math.min(Math.max(0, seconds), safeDurationEnd);
+    await seekVideoTo(offscreen, target);
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(offscreen, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) {
+      throw new Error('PNG化に失敗しました。');
+    }
+    return { blob, actualTime: target };
+  } finally {
+    offscreen.removeAttribute('src');
+    offscreen.load();
+    URL.revokeObjectURL(objectUrl);
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+}
+
+async function runBatchFrameExport() {
+  const files = state.batchFrameFiles;
+  if (!files.length) {
+    setStatus('先に動画を選択してください。');
+    return;
+  }
+  const seconds = parseFloat(batchFrameSecond?.value || '0');
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    setStatus('秒位置は0以上で指定してください。');
+    return;
+  }
+  setProcessing(true);
+  const failures = [];
+  let success = 0;
+  try {
+    setProgress({ done: 0, total: files.length, label: 'まとめて画像保存中' });
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const { blob, actualTime } = await captureFrameFromFile(file, seconds);
+        const filename = `${baseNameFromFile(file.name)}-frame-${formatStamp(actualTime)}.png`;
+        downloadBlob(blob, filename);
+        success++;
+      } catch (error) {
+        failures.push(`${file.name}: ${error.message || '失敗'}`);
+      }
+      setProgress({ done: i + 1, total: files.length, label: 'まとめて画像保存中' });
+      await delay(60);
+    }
+    const failed = failures.length;
+    if (failed) {
+      setStatus(`${success} 枚を書き出し、${failed} 件失敗しました。${failures[0]}`);
+    } else {
+      setStatus(`${success} 枚の画像を保存しました。`);
+    }
+  } finally {
+    setProgress({ done: 0, total: 0 });
+    setProcessing(false);
+  }
+}
+
+function buildBatchAudioRepairItem(file, inputName, index, channelMode) {
+  const mediaType = detectMediaType(file);
+  const channelFilter = getAudioChannelFilter(channelMode);
+  if (!channelFilter) {
+    throw new Error('元にする音を選択してください。');
+  }
+  if (mediaType === MEDIA_VIDEO) {
+    const outputName = `batch-audio-${index}.mp4`;
+    const baseArgs = [
+      '-i', inputName,
+      '-map', '0:v:0?',
+      '-map', '0:a:0',
+      '-af', channelFilter,
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+faststart',
+    ];
+    const copyArgs = baseArgs.concat(['-c:v', 'copy', outputName]);
+    const h264Args = [
+      '-i', inputName,
+      '-map', '0:v:0?',
+      '-map', '0:a:0',
+      '-af', channelFilter,
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '23',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+faststart',
+      outputName,
+    ];
+    const mpeg4Args = [
+      '-i', inputName,
+      '-map', '0:v:0?',
+      '-map', '0:a:0',
+      '-af', channelFilter,
+      '-c:v', 'mpeg4',
+      '-q:v', '4',
+      '-pix_fmt', 'yuv420p',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+faststart',
+      outputName,
+    ];
+    return {
+      variants: [{ args: copyArgs }, { args: h264Args }, { args: mpeg4Args }],
+      outputName,
+      outputType: 'video/mp4',
+      downloadName: `${baseNameFromFile(file.name)}-stereo.mp4`,
+    };
+  }
+  const bitrate = getAudioBitrate();
+  const outputName = `batch-audio-${index}.mp3`;
+  const baseArgs = [
+    '-i', inputName,
+    '-vn',
+    '-af', channelFilter,
+    '-ar', '44100',
+    '-ac', '2',
+  ];
+  const primaryArgs = baseArgs.concat(['-c:a', 'libmp3lame', '-b:a', bitrate, outputName]);
+  const fallbackArgs = baseArgs.concat(['-c:a', 'mp3', '-b:a', bitrate, outputName]);
+  return {
+    variants: [{ args: primaryArgs }, { args: fallbackArgs }],
+    outputName,
+    outputType: 'audio/mpeg',
+    downloadName: `${baseNameFromFile(file.name)}-stereo.mp3`,
+  };
+}
+
+async function runFfmpegFileBatch(files, { buildItem, onItemDone, onItemFailed }) {
+  return ffmpegQueue.run(async () => {
+    const ffmpeg = await ensureFfmpeg();
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const ext = getFileExtension(file.name) || 'dat';
+      const inputName = `batch-input-${i}.${ext}`;
+      let item = null;
+      try {
+        item = buildItem(file, inputName, i);
+        await safeDelete(ffmpeg, inputName);
+        await safeDelete(ffmpeg, item.outputName);
+        const buffer = await file.arrayBuffer();
+        await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
+        let blob = null;
+        let lastError = null;
+        for (const variant of item.variants) {
+          await safeDelete(ffmpeg, item.outputName);
+          try {
+            await ffmpeg.exec(variant.args);
+            const data = await ffmpeg.readFile(item.outputName);
+            blob = toBlob(data, item.outputType);
+            break;
+          } catch (error) {
+            lastError = error;
+          }
+        }
+        if (!blob) {
+          throw lastError || new Error('書き出しに失敗しました。');
+        }
+        if (onItemDone) {
+          await onItemDone(item, blob, i);
+        }
+      } catch (error) {
+        if (onItemFailed) {
+          await onItemFailed(file, error, i);
+        }
+      } finally {
+        await safeDelete(ffmpeg, inputName);
+        if (item) {
+          await safeDelete(ffmpeg, item.outputName);
+        }
+      }
+    }
+  });
+}
+
+async function runBatchAudioRepairExport() {
+  const files = state.batchAudioFiles;
+  if (!files.length) {
+    setStatus('先に動画/音声を選択してください。');
+    return;
+  }
+  const channelMode = sanitizeAudioChannelMode(batchAudioChannelSelect?.value);
+  if (channelMode === CHANNEL_MODE_NONE) {
+    setStatus('元にする音を選択してください。');
+    return;
+  }
+  setProcessing(true);
+  const failures = [];
+  let success = 0;
+  try {
+    setProgress({ done: 0, total: files.length, label: '音を両耳にしています' });
+    await runFfmpegFileBatch(files, {
+      buildItem: (file, inputName, index) => buildBatchAudioRepairItem(
+        file,
+        inputName,
+        index,
+        channelMode
+      ),
+      onItemDone: async (item, blob, i) => {
+        downloadBlob(blob, item.downloadName);
+        success++;
+        setProgress({ done: i + 1, total: files.length, label: '音を両耳にしています' });
+        await delay(60);
+      },
+      onItemFailed: async (file, error, i) => {
+        failures.push(`${file.name}: ${error.message || '失敗'}`);
+        setProgress({ done: i + 1, total: files.length, label: '音を両耳にしています' });
+        await delay(60);
+      },
+    });
+    const failed = failures.length;
+    if (failed) {
+      setStatus(`${success} 件を書き出し、${failed} 件失敗しました。${failures[0]}`);
+    } else {
+      setStatus(`${success} 件の音を両耳で聞けるようにしました。`);
+    }
+  } finally {
+    setProgress({ done: 0, total: 0 });
+    setProcessing(false);
   }
 }
 
@@ -2400,6 +2866,74 @@ if (aspectButtons.length) {
 if (clearVideo) {
   clearVideo.addEventListener('click', clearVideoState);
 }
+
+if (batchFrameChoose && batchFrameInput) {
+  batchFrameChoose.addEventListener('click', () => {
+    if (batchFrameChoose.dataset.dropHandled === 'true') return;
+    batchFrameInput.value = '';
+    batchFrameInput.click();
+  });
+  batchFrameInput.addEventListener('change', (event) => {
+    setBatchFrameFiles(event.target.files);
+  });
+}
+
+if (batchAudioChoose && batchAudioInput) {
+  batchAudioChoose.addEventListener('click', () => {
+    if (batchAudioChoose.dataset.dropHandled === 'true') return;
+    batchAudioInput.value = '';
+    batchAudioInput.click();
+  });
+  batchAudioInput.addEventListener('change', (event) => {
+    setBatchAudioFiles(event.target.files);
+  });
+}
+
+if (batchFrameExport) {
+  batchFrameExport.addEventListener('click', runBatchFrameExport);
+}
+
+if (batchAudioExport) {
+  batchAudioExport.addEventListener('click', runBatchAudioRepairExport);
+}
+
+document.querySelectorAll('[data-batch-drop]').forEach((target) => {
+  const kind = target.dataset.batchDrop;
+  const applyFiles = (files) => {
+    if (kind === 'frame') {
+      setBatchFrameFiles(files);
+    } else if (kind === 'audio') {
+      setBatchAudioFiles(files);
+    }
+  };
+  target.addEventListener('dragover', (event) => {
+    if (isProcessing()) return;
+    event.preventDefault();
+    target.classList.add('drag-active');
+  });
+  target.addEventListener('dragleave', (event) => {
+    if (!target.contains(event.relatedTarget)) {
+      target.classList.remove('drag-active');
+    }
+  });
+  target.addEventListener('drop', (event) => {
+    event.preventDefault();
+    target.classList.remove('drag-active');
+    if (isProcessing()) {
+      setStatus('処理中はファイルを変更できません。');
+      return;
+    }
+    const files = event.dataTransfer?.files;
+    if (files && files.length) {
+      target.dataset.dropHandled = 'true';
+      applyFiles(files);
+      setTimeout(() => {
+        delete target.dataset.dropHandled;
+      }, 250);
+    }
+  });
+});
+
 fileInput.addEventListener('change', (event) => {
   const file = event.target.files && event.target.files[0];
   if (file) {
@@ -2540,6 +3074,12 @@ if (volumeInput) {
   });
 }
 
+if (audioChannelSelect) {
+  audioChannelSelect.addEventListener('change', () => {
+    setAudioChannelMode(audioChannelSelect.value);
+  });
+}
+
 if (rotateLeftBtn) {
   rotateLeftBtn.addEventListener('click', () => {
     rotateTransform(-ROTATION_STEP);
@@ -2669,8 +3209,10 @@ if (clearVideo) {
 setMediaMode(null);
 applyPlaybackRate(DEFAULT_PLAYBACK_RATE);
 applyVolume(DEFAULT_VOLUME * 100);
+setAudioChannelMode(CHANNEL_MODE_NONE);
 applyVideoTransform();
 updateTransformUI();
+updateBatchSummaries();
 setUIMode(loadUIMode());
 setEditMode(UI_MODE_NORMAL);
 setStatus('動画/音声をドロップして開始してください。');
