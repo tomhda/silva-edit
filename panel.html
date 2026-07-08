@@ -314,7 +314,14 @@
       <div class="processing-card">
         <div class="processing-spinner" aria-hidden="true"></div>
         <div class="processing-label" id="processingLabel">処理中...</div>
-        <div class="processing-bar">
+        <div
+          class="processing-bar"
+          id="processingBar"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
           <div class="processing-fill" id="processingFill"></div>
         </div>
         <div class="processing-count" id="processingCount"></div>

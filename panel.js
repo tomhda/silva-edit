@@ -35,6 +35,7 @@ const batchAudioCount = document.getElementById('batchAudioCount');
 const batchAudioSummary = document.getElementById('batchAudioSummary');
 const processingOverlay = document.getElementById('processingOverlay');
 const processingLabel = document.getElementById('processingLabel');
+const processingBar = document.getElementById('processingBar');
 const processingFill = document.getElementById('processingFill');
 const processingCount = document.getElementById('processingCount');
 const previewSection = document.getElementById('previewSection');
@@ -98,13 +99,15 @@ const state = {
   splitMarkers: [],
   batchFrameFiles: [],
   batchAudioFiles: [],
-  bulkProgress: { total: 0, done: 0, label: '' },
+  bulkProgress: { total: 0, done: 0, label: '', itemProgress: null },
 };
 
 // FFmpeg state
 const ffmpegState = {
   instance: null,
   loading: null,
+  progressHandler: null,
+  lastProgressBucket: -1,
 };
 
 // Constants
@@ -128,6 +131,30 @@ const MODE_KEY = 'silvaEditMode';
 const MODE_YURU = 'yuru';
 const MODE_KIRI = 'kiri';
 const MIN_GAP = 0.05;
+
+function clampProgressValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.min(1, Math.max(0, number));
+}
+
+function setProcessingBarPercent(percent) {
+  const number = Number(percent);
+  const clamped = Number.isFinite(number) ? Math.min(100, Math.max(0, number)) : 0;
+  const rounded = Math.round(clamped);
+  if (processingFill) {
+    processingFill.style.width = `${clamped}%`;
+  }
+  if (processingBar) {
+    processingBar.setAttribute('aria-valuenow', `${rounded}`);
+    processingBar.setAttribute('aria-valuetext', `${rounded}%`);
+  }
+}
+
+function setActiveFfmpegProgressHandler(handler) {
+  ffmpegState.progressHandler = typeof handler === 'function' ? handler : null;
+  ffmpegState.lastProgressBucket = -1;
+}
 const UI_MODE_NORMAL = 'normal';
 const UI_MODE_BULK = 'bulk';
 const UI_MODE_BATCH = 'batch';
@@ -257,7 +284,7 @@ function setProcessing(processing) {
     if (processing) {
       processingOverlay.hidden = false;
       if (processingLabel) processingLabel.textContent = '処理中...';
-      if (processingFill) processingFill.style.width = '0%';
+      setProcessingBarPercent(0);
       if (processingCount) processingCount.textContent = '';
     } else {
       processingOverlay.hidden = true;
@@ -1567,18 +1594,26 @@ async function ensureFfmpeg() {
     throw new Error('FFmpeg が利用できません。');
   }
   const ffmpeg = new window.FFmpegWASM.FFmpeg();
-  let lastProgressBucket = -1;
   ffmpeg.on('progress', ({ progress }) => {
     if (!Number.isFinite(progress)) return;
-    const bucket = Math.floor(progress * 10);  // 10%刻み
-    if (bucket === lastProgressBucket) return;
-    lastProgressBucket = bucket;
-    const percent = Math.round(progress * 100);
+    const normalized = clampProgressValue(progress);
+    const bucket = Math.floor(normalized * 100);
+    if (bucket === ffmpegState.lastProgressBucket) return;
+    ffmpegState.lastProgressBucket = bucket;
+    const percent = Math.round(normalized * 100);
+    if (ffmpegState.progressHandler) {
+      ffmpegState.progressHandler(normalized, percent);
+      return;
+    }
     setStatus(`FFmpeg 処理中 ${percent}%`);
   });
   const coreURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.js');
   const wasmURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.wasm');
   setStatus('FFmpeg を読み込み中...');
+  if (processingOverlay && !processingOverlay.hidden) {
+    if (processingLabel) processingLabel.textContent = 'FFmpeg を読み込み中...';
+    if (processingCount) processingCount.textContent = '初回のみ少し時間がかかります';
+  }
   ffmpegState.loading = ffmpeg
     .load({ coreURL, wasmURL })
     .then(() => {
@@ -1599,6 +1634,15 @@ async function safeDelete(ffmpeg, path) {
   }
 }
 
+async function execFfmpegWithProgress(ffmpeg, args, onProgress) {
+  setActiveFfmpegProgressHandler(onProgress);
+  try {
+    await ffmpeg.exec(args);
+  } finally {
+    setActiveFfmpegProgressHandler(null);
+  }
+}
+
 // FFmpeg exec を直列化する mutex。UI disabled とは別レイヤーで FS 整合性を保護。
 const ffmpegQueue = {
   tail: Promise.resolve(),
@@ -1611,7 +1655,7 @@ const ffmpegQueue = {
 
 // items: [{ variants: [{args}, ...], outputName, outputType }]
 // onItemDone(item, blob, index): 各item完了直後に呼ぶ。Blobをbatch配列に貯めずメモリピークを抑える。
-async function runFfmpegBatch(items, { onItemDone } = {}) {
+async function runFfmpegBatch(items, { onItemStart, onItemProgress, onItemDone } = {}) {
   if (!state.file) {
     throw new Error('先にファイルを読み込んでください。');
   }
@@ -1624,12 +1668,17 @@ async function runFfmpegBatch(items, { onItemDone } = {}) {
     try {
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
+        if (onItemStart) onItemStart(item, i);
         let blob = null;
         let lastError = null;
-        for (const variant of item.variants) {
+        for (let variantIndex = 0; variantIndex < item.variants.length; variantIndex++) {
+          const variant = item.variants[variantIndex];
           await safeDelete(ffmpeg, item.outputName);
           try {
-            await ffmpeg.exec(variant.args);
+            if (onItemProgress) onItemProgress(item, 0, i, variantIndex);
+            await execFfmpegWithProgress(ffmpeg, variant.args, (progress, percent) => {
+              if (onItemProgress) onItemProgress(item, progress, i, variantIndex, percent);
+            });
             const data = await ffmpeg.readFile(item.outputName);
             blob = toBlob(data, item.outputType);
             break;
@@ -1652,7 +1701,7 @@ async function runFfmpegBatch(items, { onItemDone } = {}) {
 }
 
 // 既存呼び出し点向けの薄いラッパ。primary/fallback を variants に詰める。
-async function runFfmpegCommand({ args, outputName, outputType, fallbackArgs }) {
+async function runFfmpegCommand({ args, outputName, outputType, fallbackArgs, onProgress }) {
   const variants = [{ args }];
   if (fallbackArgs) {
     variants.push({ args: fallbackArgs });
@@ -1660,14 +1709,19 @@ async function runFfmpegCommand({ args, outputName, outputType, fallbackArgs }) 
   let resultBlob = null;
   await runFfmpegBatch(
     [{ variants, outputName, outputType }],
-    { onItemDone: (_item, blob) => { resultBlob = blob; } }
+    {
+      onItemProgress: (_item, progress) => {
+        if (onProgress) onProgress(progress);
+      },
+      onItemDone: (_item, blob) => { resultBlob = blob; },
+    }
   );
   return resultBlob;
 }
 
 
 // Export actions
-async function exportVideoWithFfmpeg() {
+async function exportVideoWithFfmpeg({ onProgress } = {}) {
   const { start, end } = sanitizeTimes();
   const duration = Math.max(0.1, end - start);
   const cropFilter = getCropFilter();
@@ -1737,12 +1791,13 @@ async function exportVideoWithFfmpeg() {
     fallbackArgs,
     outputName,
     outputType: 'video/mp4',
+    onProgress,
   });
   const clip = formatClipLabel(start, end);
   downloadBlob(blob, `${baseName()}-${clip}.mp4`);
 }
 
-async function exportAudioWithFfmpeg() {
+async function exportAudioWithFfmpeg({ onProgress } = {}) {
   const { start, end } = sanitizeTimes();
   const duration = Math.max(0.1, end - start);
   const speed = getPlaybackRate();
@@ -1785,12 +1840,13 @@ async function exportAudioWithFfmpeg() {
     fallbackArgs,
     outputName,
     outputType: 'audio/mpeg',
+    onProgress,
   });
   const clip = formatClipLabel(start, end);
   downloadBlob(blob, `${baseName()}-audio-${clip}.mp3`);
 }
 
-async function exportFrameFullWithFfmpeg() {
+async function exportFrameFullWithFfmpeg({ onProgress } = {}) {
   const time = Math.max(0, video.currentTime);
   const inputName = getInputName();
   const outputName = 'frame-full.png';
@@ -1806,11 +1862,12 @@ async function exportFrameFullWithFfmpeg() {
     args,
     outputName,
     outputType: 'image/png',
+    onProgress,
   });
   downloadBlob(blob, `${baseName()}-frame-${formatStamp(time)}.png`);
 }
 
-async function exportFrameCroppedWithFfmpeg() {
+async function exportFrameCroppedWithFfmpeg({ onProgress } = {}) {
   const time = Math.max(0, video.currentTime);
   const cropFilter = getCropFilter();
   const transformFilters = getTransformFilters();
@@ -1830,6 +1887,7 @@ async function exportFrameCroppedWithFfmpeg() {
     args,
     outputName,
     outputType: 'image/png',
+    onProgress,
   });
   downloadBlob(blob, `${baseName()}-crop-${formatStamp(time)}.png`);
 }
@@ -2308,20 +2366,36 @@ async function buildClipAudioVariants(clip) {
   };
 }
 
-function setProgress({ done, total, label }) {
-  state.bulkProgress = { done, total, label: label || '' };
-  if (total > 0) {
+function setProgress({ done = 0, total = 0, label, itemProgress = null, detail }) {
+  const safeTotal = Math.max(0, Number(total) || 0);
+  const safeDone = Math.min(safeTotal, Math.max(0, Number(done) || 0));
+  const hasItemProgress = itemProgress !== null && itemProgress !== undefined && safeDone < safeTotal;
+  const currentProgress = hasItemProgress ? clampProgressValue(itemProgress) : 0;
+  const progressUnits = hasItemProgress ? safeDone + currentProgress : safeDone;
+  const percent = safeTotal > 0 ? Math.min(100, (progressUnits / safeTotal) * 100) : 0;
+  state.bulkProgress = {
+    done: safeDone,
+    total: safeTotal,
+    label: label || '',
+    itemProgress: hasItemProgress ? currentProgress : null,
+  };
+  if (safeTotal > 0) {
     if (processingLabel) processingLabel.textContent = label || '処理中';
-    if (processingFill) {
-      processingFill.style.width = `${Math.min(100, (done / total) * 100)}%`;
-    }
+    setProcessingBarPercent(percent);
     if (processingCount) {
-      processingCount.textContent = `${done} / ${total}`;
+      if (detail) {
+        processingCount.textContent = detail;
+      } else if (hasItemProgress) {
+        processingCount.textContent = `${Math.min(safeDone + 1, safeTotal)} / ${safeTotal} ・ ${Math.round(currentProgress * 100)}%`;
+      } else {
+        processingCount.textContent = `${safeDone} / ${safeTotal}`;
+      }
     }
-    setStatus(`${label || '処理中'} ${done} / ${total}`);
+    const statusSuffix = hasItemProgress ? `${Math.round(percent)}%` : `${safeDone} / ${safeTotal}`;
+    setStatus(`${label || '処理中'} ${statusSuffix}`);
   } else {
     if (processingLabel) processingLabel.textContent = '処理中...';
-    if (processingFill) processingFill.style.width = '0%';
+    setProcessingBarPercent(0);
     if (processingCount) processingCount.textContent = '';
   }
 }
@@ -2588,7 +2662,13 @@ function buildBatchAudioRepairItem(file, inputName, index, channelMode) {
   };
 }
 
-async function runFfmpegFileBatch(files, { buildItem, onItemDone, onItemFailed }) {
+async function runFfmpegFileBatch(files, {
+  buildItem,
+  onItemStart,
+  onItemProgress,
+  onItemDone,
+  onItemFailed,
+}) {
   return ffmpegQueue.run(async () => {
     const ffmpeg = await ensureFfmpeg();
     for (let i = 0; i < files.length; i++) {
@@ -2598,16 +2678,21 @@ async function runFfmpegFileBatch(files, { buildItem, onItemDone, onItemFailed }
       let item = null;
       try {
         item = buildItem(file, inputName, i);
+        if (onItemStart) onItemStart(file, item, i);
         await safeDelete(ffmpeg, inputName);
         await safeDelete(ffmpeg, item.outputName);
         const buffer = await file.arrayBuffer();
         await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
         let blob = null;
         let lastError = null;
-        for (const variant of item.variants) {
+        for (let variantIndex = 0; variantIndex < item.variants.length; variantIndex++) {
+          const variant = item.variants[variantIndex];
           await safeDelete(ffmpeg, item.outputName);
           try {
-            await ffmpeg.exec(variant.args);
+            if (onItemProgress) onItemProgress(file, item, 0, i, variantIndex);
+            await execFfmpegWithProgress(ffmpeg, variant.args, (progress, percent) => {
+              if (onItemProgress) onItemProgress(file, item, progress, i, variantIndex, percent);
+            });
             const data = await ffmpeg.readFile(item.outputName);
             blob = toBlob(data, item.outputType);
             break;
@@ -2664,6 +2749,12 @@ async function runBatchAudioRepairExport() {
         setProgress({ done: i + 1, total: files.length, label: '音を両耳にしています' });
         await delay(60);
       },
+      onItemStart: (_file, _item, i) => {
+        setProgress({ done: i, total: files.length, label: '音を両耳にしています', itemProgress: 0 });
+      },
+      onItemProgress: (_file, _item, progress, i) => {
+        setProgress({ done: i, total: files.length, label: '音を両耳にしています', itemProgress: progress });
+      },
       onItemFailed: async (file, error, i) => {
         failures.push(`${file.name}: ${error.message || '失敗'}`);
         setProgress({ done: i + 1, total: files.length, label: '音を両耳にしています' });
@@ -2710,6 +2801,12 @@ async function runBulkExport(kind, dirHandle) {
     }
     const ext = kind === 'mp3' ? 'mp3' : 'mp4';
     await runFfmpegBatch(items, {
+      onItemStart: (_item, i) => {
+        setProgress({ done: i, total: clips.length, label: '一括書き出し中', itemProgress: 0 });
+      },
+      onItemProgress: (_item, progress, i) => {
+        setProgress({ done: i, total: clips.length, label: '一括書き出し中', itemProgress: progress });
+      },
       onItemDone: async (_item, blob, i) => {
         const clip = clips[i];
         const filename = `${baseName()}-${clip.label}.${ext}`;
@@ -2742,12 +2839,19 @@ async function runSingleClipExport(clip, kind) {
   }
   setProcessing(true);
   try {
-    setStatus(`${clip.label} を ${kind.toUpperCase()} で書き出し中...`);
+    const progressLabel = `${clip.label} を ${kind.toUpperCase()} で書き出し中`;
+    setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: 0 });
     const item = kind === 'mp3'
       ? await buildClipAudioVariants(clip)
       : await buildClipVideoVariants(clip);
     let resultBlob = null;
-    await runFfmpegBatch([item], { onItemDone: (_i, b) => { resultBlob = b; } });
+    await runFfmpegBatch([item], {
+      onItemProgress: (_item, progress) => {
+        setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: progress });
+      },
+      onItemDone: (_i, b) => { resultBlob = b; },
+    });
+    setProgress({ done: 1, total: 1, label: progressLabel });
     const ext = kind === 'mp3' ? 'mp3' : 'mp4';
     downloadBlob(resultBlob, `${baseName()}-${clip.label}.${ext}`);
     setStatus(`${clip.label} の書き出しが完了しました。`);
@@ -3123,8 +3227,14 @@ exportVideoBtn.addEventListener('click', async () => {
   }
   setProcessing(true);
   try {
-    setStatus('MP4を書き出し中...');
-    await exportVideoWithFfmpeg();
+    const progressLabel = 'MP4を書き出し中';
+    setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: 0 });
+    await exportVideoWithFfmpeg({
+      onProgress: (progress) => {
+        setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: progress });
+      },
+    });
+    setProgress({ done: 1, total: 1, label: progressLabel });
     setStatus('MP4の書き出しが完了しました。');
   } catch (error) {
     setStatus(error.message || 'MP4の書き出しに失敗しました。');
@@ -3144,21 +3254,33 @@ async function handleExportFrame({ statusPrefix, mode }) {
   }
   setProcessing(true);
   try {
-    setStatus(`${statusPrefix}...`);
+    const progressLabel = statusPrefix;
+    setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: 0 });
     if (mode === 'crop') {
-      await exportFrameCroppedWithFfmpeg();
+      await exportFrameCroppedWithFfmpeg({
+        onProgress: (progress) => {
+          setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: progress });
+        },
+      });
     } else {
-      await exportFrameFullWithFfmpeg();
+      await exportFrameFullWithFfmpeg({
+        onProgress: (progress) => {
+          setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: progress });
+        },
+      });
     }
+    setProgress({ done: 1, total: 1, label: progressLabel });
     setStatus('フレームを保存しました。');
   } catch (error) {
     try {
       setStatus('FFmpegに失敗しました。キャンバスで保存します...');
+      setProgress({ done: 0, total: 1, label: 'キャンバスで保存中', itemProgress: 0.5 });
       if (mode === 'crop') {
         await exportFrameCroppedFromCanvas();
       } else {
         await exportFrameFullFromCanvas();
       }
+      setProgress({ done: 1, total: 1, label: 'キャンバスで保存中' });
       setStatus('フレームを保存しました。');
     } catch (fallbackError) {
       setStatus(fallbackError.message || error.message || 'フレーム保存に失敗しました。');
@@ -3185,8 +3307,14 @@ exportAudioBtn.addEventListener('click', async () => {
   }
   setProcessing(true);
   try {
-    setStatus('MP3を書き出し中...');
-    await exportAudioWithFfmpeg();
+    const progressLabel = 'MP3を書き出し中';
+    setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: 0 });
+    await exportAudioWithFfmpeg({
+      onProgress: (progress) => {
+        setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: progress });
+      },
+    });
+    setProgress({ done: 1, total: 1, label: progressLabel });
     setStatus('MP3の書き出しが完了しました。');
   } catch (error) {
     setStatus(error.message || 'MP3の書き出しに失敗しました。');
