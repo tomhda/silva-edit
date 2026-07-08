@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SILVA EDIT",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "サイドパネルで動画/音声を簡単にトリミング・書き出し（まとめて画像保存・音を両耳にする・分割書き出し対応）。",
   "permissions": ["sidePanel"],
   "action": {
