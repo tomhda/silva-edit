@@ -38,6 +38,7 @@ const processingLabel = document.getElementById('processingLabel');
 const processingBar = document.getElementById('processingBar');
 const processingFill = document.getElementById('processingFill');
 const processingCount = document.getElementById('processingCount');
+const processingCancel = document.getElementById('processingCancel');
 const previewSection = document.getElementById('previewSection');
 const clearVideo = document.getElementById('clearVideo');
 const startTimeInput = document.getElementById('startTime');
@@ -106,8 +107,12 @@ const state = {
 const ffmpegState = {
   instance: null,
   loading: null,
+  loadingInstance: null,
+  loadToken: 0,
   progressHandler: null,
   lastProgressBucket: -1,
+  cancelRequested: false,
+  recentLogs: [],
 };
 
 // Constants
@@ -131,6 +136,8 @@ const MODE_KEY = 'silvaEditMode';
 const MODE_YURU = 'yuru';
 const MODE_KIRI = 'kiri';
 const MIN_GAP = 0.05;
+const EVEN_MP4_SCALE_FILTER = 'scale=ceil(iw/2)*2:ceil(ih/2)*2';
+const FFMPEG_LOG_LIMIT = 8;
 
 function clampProgressValue(value) {
   const number = Number(value);
@@ -154,6 +161,77 @@ function setProcessingBarPercent(percent) {
 function setActiveFfmpegProgressHandler(handler) {
   ffmpegState.progressHandler = typeof handler === 'function' ? handler : null;
   ffmpegState.lastProgressBucket = -1;
+}
+
+class FfmpegCancelError extends Error {
+  constructor() {
+    super('処理を中断しました。');
+    this.name = 'FfmpegCancelError';
+  }
+}
+
+function isFfmpegCancelError(error) {
+  return error instanceof FfmpegCancelError || error?.name === 'FfmpegCancelError';
+}
+
+function throwIfFfmpegCanceled() {
+  if (ffmpegState.cancelRequested) {
+    throw new FfmpegCancelError();
+  }
+}
+
+function rememberFfmpegLog(message) {
+  const line = String(message || '').trim();
+  if (!line) return;
+  ffmpegState.recentLogs.push(line);
+  while (ffmpegState.recentLogs.length > FFMPEG_LOG_LIMIT) {
+    ffmpegState.recentLogs.shift();
+  }
+}
+
+function getRecentFfmpegLog() {
+  return ffmpegState.recentLogs.slice(-3).join(' / ');
+}
+
+function createFfmpegFailureError(error, fallbackMessage = '書き出しに失敗しました。') {
+  if (isFfmpegCancelError(error)) {
+    return error;
+  }
+  const message = error?.message || fallbackMessage;
+  const recentLog = getRecentFfmpegLog();
+  if (!recentLog) {
+    return new Error(message);
+  }
+  return new Error(`${message} FFmpeg: ${recentLog}`);
+}
+
+function resetFfmpegInstance() {
+  const ffmpeg = ffmpegState.instance || ffmpegState.loadingInstance;
+  ffmpegState.loadToken++;
+  ffmpegState.instance = null;
+  ffmpegState.loading = null;
+  ffmpegState.loadingInstance = null;
+  setActiveFfmpegProgressHandler(null);
+  if (ffmpeg && typeof ffmpeg.terminate === 'function') {
+    try {
+      ffmpeg.terminate();
+    } catch (error) {
+      return;
+    }
+  }
+}
+
+function requestFfmpegCancel() {
+  if (!isProcessing()) return;
+  ffmpegState.cancelRequested = true;
+  if (processingCancel) {
+    processingCancel.disabled = true;
+    processingCancel.textContent = '中断中...';
+  }
+  if (processingLabel) processingLabel.textContent = '中断しています...';
+  if (processingCount) processingCount.textContent = '次の操作に戻しています';
+  setStatus('処理を中断しています...');
+  resetFfmpegInstance();
 }
 const UI_MODE_NORMAL = 'normal';
 const UI_MODE_BULK = 'bulk';
@@ -277,9 +355,16 @@ function setButtonsEnabled(enabled) {
 
 function setProcessing(processing) {
   document.body.classList.toggle('processing', processing);
+  if (processing) {
+    ffmpegState.cancelRequested = false;
+  }
   if (fileInput) fileInput.disabled = processing;
   if (dropzone) dropzone.classList.toggle('disabled', processing);
   if (clearVideo) clearVideo.disabled = processing || !state.file;
+  if (processingCancel) {
+    processingCancel.disabled = !processing;
+    processingCancel.textContent = '中断';
+  }
   if (processingOverlay) {
     if (processing) {
       processingOverlay.hidden = false;
@@ -1413,6 +1498,7 @@ function loadFile(file) {
   state.file = file;
   state.fileName = file.name;
   state.duration = 0;
+  state.transform = { rotation: 0, flipH: false, flipV: false };
   state.crop = { x: 0, y: 0, width: 0, height: 0 };
   state.splitMarkers = [];
   state.aspect = 'free';
@@ -1421,6 +1507,8 @@ function loadFile(file) {
   state.thumbnails.rotation = 0;
   state.thumbnails.generation++;
   syncAspectButtons();
+  applyVideoTransform();
+  updateTransformUI();
   updateInfo();
   updateCropInputs();
   updateCropSizeLabel();
@@ -1552,6 +1640,11 @@ function getTransformFilters() {
   return filters;
 }
 
+function addEvenMp4ScaleFilter(filters) {
+  filters.push(EVEN_MP4_SCALE_FILTER);
+  return filters;
+}
+
 function buildAtempoFilters(rate) {
   if (!Number.isFinite(rate) || rate <= 0 || Math.abs(rate - 1) < 0.001) {
     return [];
@@ -1594,6 +1687,9 @@ async function ensureFfmpeg() {
     throw new Error('FFmpeg が利用できません。');
   }
   const ffmpeg = new window.FFmpegWASM.FFmpeg();
+  const loadToken = ffmpegState.loadToken + 1;
+  ffmpegState.loadToken = loadToken;
+  ffmpegState.loadingInstance = ffmpeg;
   ffmpeg.on('progress', ({ progress }) => {
     if (!Number.isFinite(progress)) return;
     const normalized = clampProgressValue(progress);
@@ -1607,6 +1703,9 @@ async function ensureFfmpeg() {
     }
     setStatus(`FFmpeg 処理中 ${percent}%`);
   });
+  ffmpeg.on('log', ({ message }) => {
+    rememberFfmpegLog(message);
+  });
   const coreURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.js');
   const wasmURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.wasm');
   setStatus('FFmpeg を読み込み中...');
@@ -1617,11 +1716,27 @@ async function ensureFfmpeg() {
   ffmpegState.loading = ffmpeg
     .load({ coreURL, wasmURL })
     .then(() => {
+      if (ffmpegState.loadToken !== loadToken) {
+        if (typeof ffmpeg.terminate === 'function') {
+          try {
+            ffmpeg.terminate();
+          } catch (error) {
+            // Ignore terminate races; the stale instance must not be reused.
+          }
+        }
+        throw new FfmpegCancelError();
+      }
+      throwIfFfmpegCanceled();
       ffmpegState.instance = ffmpeg;
       return ffmpeg;
     })
     .finally(() => {
-      ffmpegState.loading = null;
+      if (ffmpegState.loadToken === loadToken) {
+        ffmpegState.loading = null;
+      }
+      if (ffmpegState.loadingInstance === ffmpeg) {
+        ffmpegState.loadingInstance = null;
+      }
     });
   return ffmpegState.loading;
 }
@@ -1635,9 +1750,17 @@ async function safeDelete(ffmpeg, path) {
 }
 
 async function execFfmpegWithProgress(ffmpeg, args, onProgress) {
+  throwIfFfmpegCanceled();
+  ffmpegState.recentLogs = [];
   setActiveFfmpegProgressHandler(onProgress);
   try {
     await ffmpeg.exec(args);
+    throwIfFfmpegCanceled();
+  } catch (error) {
+    if (ffmpegState.cancelRequested) {
+      throw new FfmpegCancelError();
+    }
+    throw error;
   } finally {
     setActiveFfmpegProgressHandler(null);
   }
@@ -1662,16 +1785,21 @@ async function runFfmpegBatch(items, { onItemStart, onItemProgress, onItemDone }
   return ffmpegQueue.run(async () => {
     const ffmpeg = await ensureFfmpeg();
     const inputName = getInputName();
-    await safeDelete(ffmpeg, inputName);
-    const buffer = await state.file.arrayBuffer();
-    await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
+    ffmpegState.recentLogs = [];
     try {
+      throwIfFfmpegCanceled();
+      await safeDelete(ffmpeg, inputName);
+      const buffer = await state.file.arrayBuffer();
+      throwIfFfmpegCanceled();
+      await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
       for (let i = 0; i < items.length; i++) {
+        throwIfFfmpegCanceled();
         const item = items[i];
         if (onItemStart) onItemStart(item, i);
         let blob = null;
         let lastError = null;
         for (let variantIndex = 0; variantIndex < item.variants.length; variantIndex++) {
+          throwIfFfmpegCanceled();
           const variant = item.variants[variantIndex];
           await safeDelete(ffmpeg, item.outputName);
           try {
@@ -1683,6 +1811,9 @@ async function runFfmpegBatch(items, { onItemStart, onItemProgress, onItemDone }
             blob = toBlob(data, item.outputType);
             break;
           } catch (error) {
+            if (isFfmpegCancelError(error)) {
+              throw error;
+            }
             lastError = error;
           }
         }
@@ -1694,6 +1825,9 @@ async function runFfmpegBatch(items, { onItemStart, onItemProgress, onItemDone }
           await onItemDone(item, blob, i);
         }
       }
+    } catch (error) {
+      resetFfmpegInstance();
+      throw createFfmpegFailureError(error);
     } finally {
       await safeDelete(ffmpeg, inputName);
     }
@@ -1733,16 +1867,17 @@ async function exportVideoWithFfmpeg({ onProgress } = {}) {
   if (Math.abs(speed - 1) >= 0.001) {
     videoFilters.push(`setpts=PTS/${Number(speed.toFixed(3))}`);
   }
+  addEvenMp4ScaleFilter(videoFilters);
   const audioFilters = buildAudioFilters({ speed });
   const inputName = getInputName();
   const outputName = 'output.mp4';
   const baseArgs = [
-    '-i',
-    inputName,
     '-ss',
     `${start}`,
     '-t',
     `${duration}`,
+    '-i',
+    inputName,
     '-map',
     '0:v:0',
     '-map',
@@ -1806,12 +1941,12 @@ async function exportAudioWithFfmpeg({ onProgress } = {}) {
   const inputName = getInputName();
   const outputName = 'audio.mp3';
   const baseArgs = [
-    '-i',
-    inputName,
     '-ss',
     `${start}`,
     '-t',
     `${duration}`,
+    '-i',
+    inputName,
     '-vn',
     '-ar',
     '44100',
@@ -2317,13 +2452,14 @@ async function buildClipVideoVariants(clip) {
   if (Math.abs(speed - 1) >= 0.001) {
     videoFilters.push(`setpts=PTS/${Number(speed.toFixed(3))}`);
   }
+  addEvenMp4ScaleFilter(videoFilters);
   const audioFilters = buildAudioFilters({ speed });
   const inputName = getInputName();
   const outputName = `clip-${clip.index}.mp4`;
   const baseArgs = [
-    '-i', inputName,
     '-ss', `${clip.start}`,
     '-t', `${clip.duration}`,
+    '-i', inputName,
     '-map', '0:v:0',
     '-map', '0:a:0?',
   ];
@@ -2351,9 +2487,9 @@ async function buildClipAudioVariants(clip) {
   const inputName = getInputName();
   const outputName = `clip-${clip.index}.mp3`;
   const baseArgs = [
-    '-i', inputName,
     '-ss', `${clip.start}`,
     '-t', `${clip.duration}`,
+    '-i', inputName,
     '-vn', '-ar', '44100', '-ac', '2',
   ];
   if (audioFilters.length) baseArgs.push('-af', audioFilters.join(','));
@@ -2472,6 +2608,7 @@ async function exportClipFramesViaCanvas(clips, dirHandle, onProgress) {
     const outCanvas = document.createElement('canvas');
     const outCtx = outCanvas.getContext('2d');
     for (let i = 0; i < clips.length; i++) {
+      throwIfFfmpegCanceled();
       const clip = clips[i];
       const target = Math.min(state.duration - 0.05, Math.max(0, clip.start));
       await seekVideoTo(offscreen, target);
@@ -2567,6 +2704,8 @@ async function runBatchFrameExport() {
   try {
     setProgress({ done: 0, total: files.length, label: 'まとめて画像保存中' });
     for (let i = 0; i < files.length; i++) {
+      throwIfFfmpegCanceled();
+      ffmpegState.recentLogs = [];
       const file = files[i];
       try {
         const { blob, actualTime } = await captureFrameFromFile(file, seconds);
@@ -2574,6 +2713,9 @@ async function runBatchFrameExport() {
         downloadBlob(blob, filename);
         success++;
       } catch (error) {
+        if (isFfmpegCancelError(error)) {
+          throw error;
+        }
         failures.push(`${file.name}: ${error.message || '失敗'}`);
       }
       setProgress({ done: i + 1, total: files.length, label: 'まとめて画像保存中' });
@@ -2585,6 +2727,8 @@ async function runBatchFrameExport() {
     } else {
       setStatus(`${success} 枚の画像を保存しました。`);
     }
+  } catch (error) {
+    setStatus(error.message || 'まとめて画像保存を中断しました。');
   } finally {
     setProgress({ done: 0, total: 0 });
     setProcessing(false);
@@ -2614,6 +2758,7 @@ function buildBatchAudioRepairItem(file, inputName, index, channelMode) {
       '-map', '0:v:0?',
       '-map', '0:a:0',
       '-af', channelFilter,
+      '-vf', EVEN_MP4_SCALE_FILTER,
       '-c:v', 'libx264',
       '-preset', 'veryfast',
       '-crf', '23',
@@ -2628,6 +2773,7 @@ function buildBatchAudioRepairItem(file, inputName, index, channelMode) {
       '-map', '0:v:0?',
       '-map', '0:a:0',
       '-af', channelFilter,
+      '-vf', EVEN_MP4_SCALE_FILTER,
       '-c:v', 'mpeg4',
       '-q:v', '4',
       '-pix_fmt', 'yuv420p',
@@ -2670,22 +2816,28 @@ async function runFfmpegFileBatch(files, {
   onItemFailed,
 }) {
   return ffmpegQueue.run(async () => {
-    const ffmpeg = await ensureFfmpeg();
+    let ffmpeg = null;
     for (let i = 0; i < files.length; i++) {
+      throwIfFfmpegCanceled();
+      ffmpegState.recentLogs = [];
       const file = files[i];
       const ext = getFileExtension(file.name) || 'dat';
       const inputName = `batch-input-${i}.${ext}`;
       let item = null;
       try {
         item = buildItem(file, inputName, i);
+        ffmpeg = await ensureFfmpeg();
         if (onItemStart) onItemStart(file, item, i);
+        throwIfFfmpegCanceled();
         await safeDelete(ffmpeg, inputName);
         await safeDelete(ffmpeg, item.outputName);
         const buffer = await file.arrayBuffer();
+        throwIfFfmpegCanceled();
         await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
         let blob = null;
         let lastError = null;
         for (let variantIndex = 0; variantIndex < item.variants.length; variantIndex++) {
+          throwIfFfmpegCanceled();
           const variant = item.variants[variantIndex];
           await safeDelete(ffmpeg, item.outputName);
           try {
@@ -2697,6 +2849,9 @@ async function runFfmpegFileBatch(files, {
             blob = toBlob(data, item.outputType);
             break;
           } catch (error) {
+            if (isFfmpegCancelError(error)) {
+              throw error;
+            }
             lastError = error;
           }
         }
@@ -2707,12 +2862,22 @@ async function runFfmpegFileBatch(files, {
           await onItemDone(item, blob, i);
         }
       } catch (error) {
+        if (isFfmpegCancelError(error)) {
+          throw error;
+        }
+        if (ffmpeg) {
+          resetFfmpegInstance();
+          ffmpeg = null;
+        }
+        const failure = createFfmpegFailureError(error);
         if (onItemFailed) {
-          await onItemFailed(file, error, i);
+          await onItemFailed(file, failure, i);
         }
       } finally {
-        await safeDelete(ffmpeg, inputName);
-        if (item) {
+        if (ffmpeg) {
+          await safeDelete(ffmpeg, inputName);
+        }
+        if (ffmpeg && item) {
           await safeDelete(ffmpeg, item.outputName);
         }
       }
@@ -2767,6 +2932,8 @@ async function runBatchAudioRepairExport() {
     } else {
       setStatus(`${success} 件の音を両耳で聞けるようにしました。`);
     }
+  } catch (error) {
+    setStatus(error.message || '音を両耳にする処理を中断しました。');
   } finally {
     setProgress({ done: 0, total: 0 });
     setProcessing(false);
@@ -2796,6 +2963,7 @@ async function runBulkExport(kind, dirHandle) {
     }
     const items = [];
     for (const c of clips) {
+      throwIfFfmpegCanceled();
       if (kind === 'mp3') items.push(await buildClipAudioVariants(c));
       else items.push(await buildClipVideoVariants(c));
     }
@@ -3214,6 +3382,10 @@ if (modeButtons.length) {
       setUIMode(button.dataset.mode);
     });
   });
+}
+
+if (processingCancel) {
+  processingCancel.addEventListener('click', requestFfmpegCancel);
 }
 
 exportVideoBtn.addEventListener('click', async () => {

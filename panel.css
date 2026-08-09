@@ -1101,6 +1101,29 @@ body.mode-kiri .processing-bar {
   min-height: 14px;
 }
 
+.processing-cancel {
+  min-width: 96px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--bg-ink);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.processing-cancel:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.processing-cancel:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
 body.processing {
   cursor: progress;
 }
