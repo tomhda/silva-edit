@@ -22,30 +22,58 @@
 
   <!-- Silba-kun (Black English Cocker Spaniel) -->
   <!-- Left ear -->
-  <ellipse cx="32" cy="70" rx="14" ry="28" fill="#1a1714" />
-  <ellipse cx="32" cy="72" rx="10" ry="22" fill="#2a2520" />
+  <ellipse cx="35" cy="52" rx="12" ry="22" fill="#1a1714" />
+  <ellipse cx="35" cy="54" rx="8" ry="16.5" fill="#2a2520" />
 
   <!-- Right ear -->
-  <ellipse cx="96" cy="70" rx="14" ry="28" fill="#1a1714" />
-  <ellipse cx="96" cy="72" rx="10" ry="22" fill="#2a2520" />
+  <ellipse cx="93" cy="52" rx="12" ry="22" fill="#1a1714" />
+  <ellipse cx="93" cy="54" rx="8" ry="16.5" fill="#2a2520" />
 
   <!-- Head -->
-  <ellipse cx="64" cy="58" rx="28" ry="26" fill="#1a1714" />
+  <ellipse cx="64" cy="44" rx="24" ry="22" fill="#1a1714" />
 
-  <!-- Snout -->
-  <ellipse cx="64" cy="72" rx="16" ry="12" fill="#2a2520" />
+  <!-- Muzzle -->
+  <ellipse cx="64" cy="58" rx="14" ry="11" fill="#2a2520" />
 
   <!-- Nose -->
-  <ellipse cx="64" cy="68" rx="7" ry="5" fill="#0f0d0b" />
-  <ellipse cx="64" cy="67" rx="2" ry="1" fill="#4a4540" />
+  <ellipse cx="64" cy="52" rx="6" ry="4.2" fill="#0f0d0b" />
+  <ellipse cx="64" cy="51" rx="1.9" ry="1" fill="#4a4540" />
 
   <!-- Eyes -->
-  <ellipse cx="52" cy="54" rx="6" ry="7" fill="#0f0d0b" />
-  <ellipse cx="76" cy="54" rx="6" ry="7" fill="#0f0d0b" />
+  <ellipse cx="53" cy="40" rx="5.2" ry="6.2" fill="#0f0d0b" />
+  <ellipse cx="75" cy="40" rx="5.2" ry="6.2" fill="#0f0d0b" />
   <!-- Eye shine -->
-  <circle cx="54" cy="52" r="2" fill="#fff" opacity="0.8" />
-  <circle cx="78" cy="52" r="2" fill="#fff" opacity="0.8" />
+  <circle cx="54.7" cy="38" r="1.8" fill="#fff" opacity="0.8" />
+  <circle cx="76.7" cy="38" r="1.8" fill="#fff" opacity="0.8" />
 
-  <!-- Play button overlay (subtle) -->
-  <path d="M56 90 L56 102 L70 96 Z" fill="#d35f42" opacity="0.9" />
+  <!-- Scissors (carried in the mouth) -->
+  <g transform="translate(64 84) rotate(-5)">
+    <!-- Dark casing so the tool reads on both the cream frame and the black coat -->
+    <g fill="none" stroke="#241f1b" stroke-linecap="round">
+      <line x1="0" y1="0" x2="28" y2="-10" stroke-width="8" />
+      <line x1="0" y1="0" x2="28" y2="10" stroke-width="8" />
+      <line x1="0" y1="0" x2="-17" y2="-8.5" stroke-width="8" />
+      <line x1="0" y1="0" x2="-17" y2="8.5" stroke-width="8" />
+      <circle cx="-23" cy="-11" r="7" stroke-width="7" />
+      <circle cx="-23" cy="11" r="7" stroke-width="7" />
+    </g>
+    <!-- Blades -->
+    <g fill="none" stroke="#f5efe3" stroke-linecap="round" stroke-width="4.4">
+      <line x1="0" y1="0" x2="27" y2="-9.6" />
+      <line x1="0" y1="0" x2="27" y2="9.6" />
+    </g>
+    <!-- Handles -->
+    <g fill="none" stroke="#d35f42" stroke-linecap="round">
+      <line x1="0" y1="0" x2="-17" y2="-8.5" stroke-width="4.4" />
+      <line x1="0" y1="0" x2="-17" y2="8.5" stroke-width="4.4" />
+      <circle cx="-23" cy="-11" r="7" stroke-width="4" />
+      <circle cx="-23" cy="11" r="7" stroke-width="4" />
+    </g>
+    <!-- Pivot -->
+    <circle cx="0" cy="0" r="3.2" fill="#241f1b" />
+    <circle cx="0" cy="0" r="1.4" fill="#f5efe3" />
+  </g>
+
+  <!-- Lower jaw, drawn over the pivot so the scissors read as gripped -->
+  <ellipse cx="64" cy="74" rx="9.5" ry="11" fill="#1a1714" />
 </svg>
