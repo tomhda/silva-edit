@@ -15,6 +15,14 @@
 - 利用ファイル: `vendor/ffmpeg/ffmpeg-core.js`, `vendor/ffmpeg/ffmpeg-core.wasm`
 - 参照: https://github.com/ffmpegwasm/ffmpeg.wasm
 
+### 2-1. ffmpeg-core（マルチスレッド版）
+
+- 名称: `@ffmpeg/core-mt` 0.12.4（umd ビルド）
+- 利用ファイル: `vendor/ffmpeg-mt/ffmpeg-core.js`, `vendor/ffmpeg-mt/ffmpeg-core.wasm`, `vendor/ffmpeg-mt/ffmpeg-core.worker.js`
+- 参照: https://github.com/ffmpegwasm/ffmpeg.wasm
+
+シングルスレッド版と同じ FFmpeg 構成のマルチスレッドビルドです。ライセンス条件も同じ扱いとしてください。
+
 `ffmpeg-core.wasm` に含まれるビルド設定文字列から、少なくとも以下の構成が確認できます。
 
 - `--enable-gpl`

@@ -116,6 +116,7 @@ const ffmpegState = {
   lastProgressBucket: -1,
   cancelRequested: false,
   recentLogs: [],
+  coreLabel: null,
 };
 
 // Constants
@@ -144,6 +145,9 @@ const EXPORT_MODE_FAST = 'fast';
 const MIN_GAP = 0.05;
 const EVEN_MP4_SCALE_FILTER = 'scale=ceil(iw/2)*2:ceil(ih/2)*2';
 const FFMPEG_LOG_LIMIT = 8;
+// core-mt では -threads を省くと libx264 が自動検出した数でデッドロックする。
+// 実測で 2/3/4 は同速、6 以上はハング。速度を取りつつ閾値から遠い 2 を使う。
+const MT_THREAD_COUNT = 2;
 
 function clampProgressValue(value) {
   const number = Number(value);
@@ -217,14 +221,9 @@ function resetFfmpegInstance() {
   ffmpegState.instance = null;
   ffmpegState.loading = null;
   ffmpegState.loadingInstance = null;
+  ffmpegState.coreLabel = null;
   setActiveFfmpegProgressHandler(null);
-  if (ffmpeg && typeof ffmpeg.terminate === 'function') {
-    try {
-      ffmpeg.terminate();
-    } catch (error) {
-      return;
-    }
-  }
+  terminateFfmpegQuietly(ffmpeg);
 }
 
 function requestFfmpegCancel() {
@@ -1762,20 +1761,37 @@ function toBlob(data, type) {
 }
 
 // FFmpeg execution
-async function ensureFfmpeg() {
-  if (ffmpegState.instance) {
-    return ffmpegState.instance;
+function terminateFfmpegQuietly(ffmpeg) {
+  if (!ffmpeg || typeof ffmpeg.terminate !== 'function') return;
+  try {
+    ffmpeg.terminate();
+  } catch (error) {
+    // Ignore terminate races; the stale instance must not be reused.
   }
-  if (ffmpegState.loading) {
-    return ffmpegState.loading;
+}
+
+// マルチスレッド版を優先し、SharedArrayBuffer が使えない環境や
+// 読み込みに失敗した場合はシングルスレッド版へ落とす。
+function getFfmpegCoreConfigs() {
+  const configs = [];
+  if (self.crossOriginIsolated) {
+    configs.push({
+      label: 'mt',
+      coreURL: chrome.runtime.getURL('vendor/ffmpeg-mt/ffmpeg-core.js'),
+      wasmURL: chrome.runtime.getURL('vendor/ffmpeg-mt/ffmpeg-core.wasm'),
+      workerURL: chrome.runtime.getURL('vendor/ffmpeg-mt/ffmpeg-core.worker.js'),
+    });
   }
-  if (!window.FFmpegWASM || !window.FFmpegWASM.FFmpeg) {
-    throw new Error('FFmpeg が利用できません。');
-  }
+  configs.push({
+    label: 'st',
+    coreURL: chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.js'),
+    wasmURL: chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.wasm'),
+  });
+  return configs;
+}
+
+function createFfmpegInstance() {
   const ffmpeg = new window.FFmpegWASM.FFmpeg();
-  const loadToken = ffmpegState.loadToken + 1;
-  ffmpegState.loadToken = loadToken;
-  ffmpegState.loadingInstance = ffmpeg;
   ffmpeg.on('progress', ({ progress }) => {
     if (!Number.isFinite(progress)) return;
     const normalized = clampProgressValue(progress);
@@ -1792,38 +1808,68 @@ async function ensureFfmpeg() {
   ffmpeg.on('log', ({ message }) => {
     rememberFfmpegLog(message);
   });
-  const coreURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.js');
-  const wasmURL = chrome.runtime.getURL('vendor/ffmpeg/ffmpeg-core.wasm');
+  return ffmpeg;
+}
+
+async function loadFfmpegCore(loadToken) {
+  const configs = getFfmpegCoreConfigs();
+  let lastError = null;
+  for (const config of configs) {
+    if (ffmpegState.loadToken !== loadToken) {
+      throw new FfmpegCancelError();
+    }
+    throwIfFfmpegCanceled();
+    const ffmpeg = createFfmpegInstance();
+    ffmpegState.loadingInstance = ffmpeg;
+    const { label, ...loadOptions } = config;
+    try {
+      await ffmpeg.load(loadOptions);
+      if (ffmpegState.loadToken !== loadToken) {
+        terminateFfmpegQuietly(ffmpeg);
+        throw new FfmpegCancelError();
+      }
+      throwIfFfmpegCanceled();
+      ffmpegState.instance = ffmpeg;
+      ffmpegState.coreLabel = label;
+      return ffmpeg;
+    } catch (error) {
+      terminateFfmpegQuietly(ffmpeg);
+      if (ffmpegState.loadingInstance === ffmpeg) {
+        ffmpegState.loadingInstance = null;
+      }
+      if (isFfmpegCancelError(error)) {
+        throw error;
+      }
+      lastError = error;
+      rememberFfmpegLog(`core "${label}" の読み込みに失敗: ${error?.message || error}`);
+    }
+  }
+  throw lastError || new Error('FFmpeg の読み込みに失敗しました。');
+}
+
+async function ensureFfmpeg() {
+  if (ffmpegState.instance) {
+    return ffmpegState.instance;
+  }
+  if (ffmpegState.loading) {
+    return ffmpegState.loading;
+  }
+  if (!window.FFmpegWASM || !window.FFmpegWASM.FFmpeg) {
+    throw new Error('FFmpeg が利用できません。');
+  }
+  const loadToken = ffmpegState.loadToken + 1;
+  ffmpegState.loadToken = loadToken;
   setStatus('FFmpeg を読み込み中...');
   if (processingOverlay && !processingOverlay.hidden) {
     if (processingLabel) processingLabel.textContent = 'FFmpeg を読み込み中...';
     if (processingCount) processingCount.textContent = '初回のみ少し時間がかかります';
   }
-  ffmpegState.loading = ffmpeg
-    .load({ coreURL, wasmURL })
-    .then(() => {
-      if (ffmpegState.loadToken !== loadToken) {
-        if (typeof ffmpeg.terminate === 'function') {
-          try {
-            ffmpeg.terminate();
-          } catch (error) {
-            // Ignore terminate races; the stale instance must not be reused.
-          }
-        }
-        throw new FfmpegCancelError();
-      }
-      throwIfFfmpegCanceled();
-      ffmpegState.instance = ffmpeg;
-      return ffmpeg;
-    })
-    .finally(() => {
-      if (ffmpegState.loadToken === loadToken) {
-        ffmpegState.loading = null;
-      }
-      if (ffmpegState.loadingInstance === ffmpeg) {
-        ffmpegState.loadingInstance = null;
-      }
-    });
+  ffmpegState.loading = loadFfmpegCore(loadToken).finally(() => {
+    if (ffmpegState.loadToken === loadToken) {
+      ffmpegState.loading = null;
+    }
+    ffmpegState.loadingInstance = null;
+  });
   return ffmpegState.loading;
 }
 
@@ -1835,12 +1881,21 @@ async function safeDelete(ffmpeg, path) {
   }
 }
 
+// 引数配列は末尾が必ず出力ファイル名なので、その直前に出力オプションとして挿す。
+function withMtThreadLimit(args) {
+  if (ffmpegState.coreLabel !== 'mt') return args;
+  if (args.includes('-threads')) return args;
+  const limited = args.slice();
+  limited.splice(limited.length - 1, 0, '-threads', String(MT_THREAD_COUNT));
+  return limited;
+}
+
 async function execFfmpegWithProgress(ffmpeg, args, onProgress) {
   throwIfFfmpegCanceled();
   ffmpegState.recentLogs = [];
   setActiveFfmpegProgressHandler(onProgress);
   try {
-    await ffmpeg.exec(args);
+    await ffmpeg.exec(withMtThreadLimit(args));
     throwIfFfmpegCanceled();
   } catch (error) {
     if (ffmpegState.cancelRequested) {

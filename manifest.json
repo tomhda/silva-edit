@@ -4,6 +4,8 @@
   "version": "1.7",
   "description": "サイドパネルで動画/音声を簡単にトリミング・書き出し（まとめて画像保存・音を両耳にする・分割書き出し対応）。",
   "permissions": ["sidePanel"],
+  "cross_origin_embedder_policy": { "value": "require-corp" },
+  "cross_origin_opener_policy": { "value": "same-origin" },
   "action": {
     "default_title": "SILVA EDIT",
     "default_icon": {

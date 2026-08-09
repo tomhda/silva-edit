@@ -83,6 +83,14 @@
 
 - https://chromewebstore.google.com/detail/jhoopmdknkooacpocbapgmmmgladkfbc
 
+## 処理エンジン
+
+`manifest.json` で cross-origin isolation（`cross_origin_embedder_policy` / `cross_origin_opener_policy`）を有効にしているため `SharedArrayBuffer` が使え、マルチスレッド版の FFmpeg WASM で処理します。再エンコードを伴う書き出しは、シングルスレッド版と比べて実測で約 2.2 倍速くなります（8 秒 / 640x360 のクリップで 5,070ms → 2,269ms）。
+
+`SharedArrayBuffer` が使えない環境や、マルチスレッド版の読み込みに失敗した場合は、同梱のシングルスレッド版へ自動で切り替わります。
+
+なお `@ffmpeg/core-mt` は `-threads` を指定しないと libx264 がデッドロックするため、常に明示しています（`MT_THREAD_COUNT`）。
+
 ## 動作方針（プライバシー）
 
 - `ffmpeg-core.wasm` を使ったローカル処理です
@@ -107,7 +115,8 @@
 - `panel.html`: UI レイアウト
 - `panel.css`: UI スタイル
 - `panel.js`: 編集ロジック（トリム/クロップ/変形/FFmpeg処理）
-- `vendor/ffmpeg/`: FFmpeg WASM 関連ファイル
+- `vendor/ffmpeg/`: FFmpeg WASM（シングルスレッド版・フォールバック用）
+- `vendor/ffmpeg-mt/`: FFmpeg WASM（マルチスレッド版・通常はこちらを使用）
 - `images/`: アイコン類
 
 ## 開発メモ
