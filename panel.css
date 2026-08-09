@@ -171,6 +171,33 @@ body:not(.has-video) .preview {
   gap: 8px;
 }
 
+.export-mode {
+  display: grid;
+  gap: 4px;
+}
+
+.export-mode-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.export-mode-row label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.export-mode .hint:empty {
+  display: none;
+}
+
+/* 方式の選択が効くのは MP4 書き出しだけなので、動画を読み込んでいる時だけ出す。 */
+body:not(.media-video) .export-mode {
+  display: none;
+}
+
 .footer {
   margin-top: auto;
   display: grid;

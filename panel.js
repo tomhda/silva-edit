@@ -39,6 +39,8 @@ const processingBar = document.getElementById('processingBar');
 const processingFill = document.getElementById('processingFill');
 const processingCount = document.getElementById('processingCount');
 const processingCancel = document.getElementById('processingCancel');
+const exportModeSelect = document.getElementById('exportMode');
+const exportModeHint = document.getElementById('exportModeHint');
 const previewSection = document.getElementById('previewSection');
 const clearVideo = document.getElementById('clearVideo');
 const startTimeInput = document.getElementById('startTime');
@@ -97,6 +99,7 @@ const state = {
   shiftHeld: false,
   thumbnails: { generated: false, duration: 0, rotation: 0, generation: 0 },
   uiMode: 'normal',
+  exportMode: 'quality',
   splitMarkers: [],
   batchFrameFiles: [],
   batchAudioFiles: [],
@@ -135,6 +138,9 @@ const ROTATION_STEP = 90;
 const MODE_KEY = 'silvaEditMode';
 const MODE_YURU = 'yuru';
 const MODE_KIRI = 'kiri';
+const EXPORT_MODE_KEY = 'silvaEditExportMode';
+const EXPORT_MODE_QUALITY = 'quality';
+const EXPORT_MODE_FAST = 'fast';
 const MIN_GAP = 0.05;
 const EVEN_MP4_SCALE_FILTER = 'scale=ceil(iw/2)*2:ceil(ih/2)*2';
 const FFMPEG_LOG_LIMIT = 8;
@@ -304,6 +310,7 @@ function setButtonsEnabled(enabled) {
     exportFrameCropBtn.disabled = !enabled || isAudio;
   }
   exportAudioBtn.disabled = !enabled;
+  if (exportModeSelect) exportModeSelect.disabled = isProcessing();
   setStartBtn.disabled = !enabled;
   setEndBtn.disabled = !enabled;
   useSourceBtn.disabled = !enabled || isAudio;
@@ -1670,6 +1677,85 @@ function getPlaybackRate() {
   return sanitizePlaybackRate(state.playbackRate);
 }
 
+// 映像・音声に一切手を入れていないときだけ、再エンコードを丸ごと飛ばせる。
+function canStreamCopy() {
+  if (getCropFilter()) return false;
+  if (getTransformFilters().length) return false;
+  if (Math.abs(getPlaybackRate() - 1) >= 0.001) return false;
+  if (buildAudioFilters({ speed: 1 }).length) return false;
+  return true;
+}
+
+function isStreamCopyRequested() {
+  return state.exportMode === EXPORT_MODE_FAST && canStreamCopy();
+}
+
+// -c copy は最寄りのキーフレームから切り出すため、開始位置が要求値より前にずれる。
+function buildStreamCopyArgs(start, duration, outputName) {
+  return [
+    '-ss',
+    `${start}`,
+    '-t',
+    `${duration}`,
+    '-i',
+    getInputName(),
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
+    '-c',
+    'copy',
+    '-avoid_negative_ts',
+    'make_zero',
+    '-movflags',
+    '+faststart',
+    outputName,
+  ];
+}
+
+function loadExportMode() {
+  try {
+    return localStorage.getItem(EXPORT_MODE_KEY) === EXPORT_MODE_FAST
+      ? EXPORT_MODE_FAST
+      : EXPORT_MODE_QUALITY;
+  } catch (error) {
+    return EXPORT_MODE_QUALITY;
+  }
+}
+
+function saveExportMode(mode) {
+  try {
+    localStorage.setItem(EXPORT_MODE_KEY, mode);
+  } catch (error) {
+    return;
+  }
+}
+
+function updateExportModeHint() {
+  if (!exportModeHint) return;
+  const copyable = canStreamCopy();
+  if (state.exportMode === EXPORT_MODE_FAST) {
+    exportModeHint.textContent = copyable
+      ? '再エンコードせずに切り出すため一瞬で終わります。カット位置は最寄りのキーフレームに寄ります。'
+      : 'クロップ/回転/速度/音量の変更があるため、今回は高品質書き出しになります。';
+    return;
+  }
+  exportModeHint.textContent = copyable
+    ? '尺を切るだけなら「高速」で画質そのまま・大幅に短時間で書き出せます。'
+    : '';
+}
+
+let exportModeHintHandle = null;
+
+// サイドパネルが隠れていると rAF が止まるため、タイマーで確実に走らせる。
+function scheduleExportModeHint() {
+  if (exportModeHintHandle !== null) return;
+  exportModeHintHandle = setTimeout(() => {
+    exportModeHintHandle = null;
+    updateExportModeHint();
+  }, 0);
+}
+
 function toBlob(data, type) {
   const buffer = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
   return new Blob([buffer], { type });
@@ -1808,7 +1894,13 @@ async function runFfmpegBatch(items, { onItemStart, onItemProgress, onItemDone }
               if (onItemProgress) onItemProgress(item, progress, i, variantIndex, percent);
             });
             const data = await ffmpeg.readFile(item.outputName);
-            blob = toBlob(data, item.outputType);
+            const candidate = toBlob(data, item.outputType);
+            // exec が例外を投げないまま空ファイルだけ残すことがある
+            // （MP4 に copy できないコーデックなど）。次の variant に落とす。
+            if (!candidate.size) {
+              throw new Error('出力が空になりました。');
+            }
+            blob = candidate;
             break;
           } catch (error) {
             if (isFfmpegCancelError(error)) {
@@ -1835,8 +1927,19 @@ async function runFfmpegBatch(items, { onItemStart, onItemProgress, onItemDone }
 }
 
 // 既存呼び出し点向けの薄いラッパ。primary/fallback を variants に詰める。
-async function runFfmpegCommand({ args, outputName, outputType, fallbackArgs, onProgress }) {
-  const variants = [{ args }];
+async function runFfmpegCommand({
+  args,
+  outputName,
+  outputType,
+  fallbackArgs,
+  preferredArgs,
+  onProgress,
+}) {
+  const variants = [];
+  if (preferredArgs) {
+    variants.push({ args: preferredArgs });
+  }
+  variants.push({ args });
   if (fallbackArgs) {
     variants.push({ args: fallbackArgs });
   }
@@ -1924,6 +2027,10 @@ async function exportVideoWithFfmpeg({ onProgress } = {}) {
   const blob = await runFfmpegCommand({
     args: primaryArgs,
     fallbackArgs,
+    // copy が通らないコンテナ/コーデックなら variants が自動で再エンコードに落ちる。
+    preferredArgs: isStreamCopyRequested()
+      ? buildStreamCopyArgs(start, duration, outputName)
+      : null,
     outputName,
     outputType: 'video/mp4',
     onProgress,
@@ -2473,8 +2580,13 @@ async function buildClipVideoVariants(clip) {
     '-c:v', 'mpeg4', '-q:v', '4', '-pix_fmt', 'yuv420p',
     '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputName,
   ]);
+  const variants = [];
+  if (isStreamCopyRequested()) {
+    variants.push({ args: buildStreamCopyArgs(clip.start, clip.duration, outputName) });
+  }
+  variants.push({ args: primaryArgs }, { args: fallbackArgs });
   return {
-    variants: [{ args: primaryArgs }, { args: fallbackArgs }],
+    variants,
     outputName,
     outputType: 'video/mp4',
   };
@@ -2846,7 +2958,13 @@ async function runFfmpegFileBatch(files, {
               if (onItemProgress) onItemProgress(file, item, progress, i, variantIndex, percent);
             });
             const data = await ffmpeg.readFile(item.outputName);
-            blob = toBlob(data, item.outputType);
+            const candidate = toBlob(data, item.outputType);
+            // exec が例外を投げないまま空ファイルだけ残すことがある
+            // （MP4 に copy できないコーデックなど）。次の variant に落とす。
+            if (!candidate.size) {
+              throw new Error('出力が空になりました。');
+            }
+            blob = candidate;
             break;
           } catch (error) {
             if (isFfmpegCancelError(error)) {
@@ -3387,6 +3505,22 @@ if (modeButtons.length) {
 if (processingCancel) {
   processingCancel.addEventListener('click', requestFfmpegCancel);
 }
+
+state.exportMode = loadExportMode();
+if (exportModeSelect) {
+  exportModeSelect.value = state.exportMode;
+  exportModeSelect.addEventListener('change', () => {
+    state.exportMode =
+      exportModeSelect.value === EXPORT_MODE_FAST ? EXPORT_MODE_FAST : EXPORT_MODE_QUALITY;
+    saveExportMode(state.exportMode);
+    updateExportModeHint();
+  });
+}
+// クロップやトリムは多数のハンドラから更新されるため、まとめて拾って再判定する。
+['input', 'change', 'click', 'pointerup'].forEach((type) => {
+  document.addEventListener(type, scheduleExportModeHint, true);
+});
+updateExportModeHint();
 
 exportVideoBtn.addEventListener('click', async () => {
   if (!state.duration) {

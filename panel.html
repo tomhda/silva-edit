@@ -303,6 +303,16 @@
     </section>
 
     <section class="actions">
+      <div class="export-mode">
+        <div class="export-mode-row">
+          <label for="exportMode">書き出し方式</label>
+          <select id="exportMode">
+            <option value="quality">高品質（カット位置が正確）</option>
+            <option value="fast">高速（無劣化・キーフレーム単位）</option>
+          </select>
+        </div>
+        <div class="hint" id="exportModeHint"></div>
+      </div>
       <button id="exportVideo" class="primary mode-normal-only">編集動画書き出し</button>
       <button id="exportAudio" class="secondary mode-normal-only">音声のみ保存（MP3）</button>
       <button id="bulkExportAllMp4" class="primary mode-bulk-only">分割を一括書き出し（MP4）</button>
