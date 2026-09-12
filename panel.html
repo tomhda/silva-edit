@@ -40,8 +40,9 @@
     </section>
 
     <section class="preview" id="previewSection">
+      <div class="video-col">
       <div class="video-wrap">
-        <video id="video" class="video" controls preload="auto"></video>
+        <video id="video" class="video" preload="auto" playsinline></video>
         <button
           id="exportFrame"
           class="frame-button"
@@ -55,6 +56,20 @@
             />
           </svg>
         </button>
+      </div>
+      <div class="transport" id="transport">
+        <button id="playToggle" class="ghost icon-btn play-btn" type="button" aria-label="再生" aria-pressed="false">
+          <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+          <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 5h4v14H7zM13 5h4v14h-4z" />
+          </svg>
+        </button>
+        <input id="seekBar" class="seek-bar" type="range" min="0" max="1000" step="1" value="0" aria-label="シーク" />
+        <span id="seekTime" class="seek-time">0:00.0 / 0:00.0</span>
+        <button id="playRange" class="ghost small" type="button">区間を再生</button>
+      </div>
       </div>
       <div class="canvas-wrap">
         <div class="canvas-label">クロップ範囲</div>
@@ -91,11 +106,12 @@
 
     <section class="controls">
       <div class="control-block trim">
-        <div class="block-title">長さトリミング</div>
+        <div class="block-title">トリミング</div>
         <div class="trim-scrubber" id="trimScrubber">
           <canvas id="trimThumbs" class="trim-thumbs" aria-hidden="true"></canvas>
           <div class="trim-track" aria-hidden="true"></div>
           <div class="trim-range" id="trimRange" aria-hidden="true"></div>
+          <div id="trimPlayhead" class="trim-playhead" aria-hidden="true"></div>
           <input id="trimStartRange" class="trim-range-input trim-range-start"
                  type="range" min="0" max="1000" step="1" value="0"
                  aria-label="開始位置" />
@@ -107,71 +123,23 @@
           <span id="trimStartLabel">00:00.0</span>
           <span id="trimEndLabel">00:00.0</span>
         </div>
-        <div class="row split">
-          <div class="field">
-            <label for="startTime">開始（秒）</label>
-            <input id="startTime" type="number" min="0" step="0.1" />
+        <div class="row trim-input-row">
+          <span class="trim-field">
+            <label for="startTime">開始</label>
+            <input id="startTime" class="num num-sec" type="number" min="0" step="0.1" />
             <button id="setStart" class="ghost small">現在位置</button>
-          </div>
-          <div class="field">
-            <label for="endTime">終了（秒）</label>
-            <input id="endTime" type="number" min="0" step="0.1" />
+          </span>
+          <span class="trim-field">
+            <label for="endTime">終了</label>
+            <input id="endTime" class="num num-sec" type="number" min="0" step="0.1" />
             <button id="setEnd" class="ghost small">現在位置</button>
-          </div>
-        </div>
-        <div class="row speed-row">
-          <label for="playbackRate">再生速度</label>
-          <input id="playbackRate" type="number" min="0.25" max="4" step="0.05" value="1" />
-          <span class="rate-unit">x</span>
-        </div>
-        <div class="row quality-row">
-          <label for="audioQuality">MP3音質</label>
-          <select id="audioQuality">
-            <option value="high" selected>高 (320kbps)</option>
-            <option value="medium">中 (192kbps)</option>
-          </select>
-        </div>
-        <div class="row volume-row">
-          <label for="volume">音量</label>
-          <input id="volume" type="range" min="0" max="200" step="5" value="100" />
-          <span id="volumeValue" class="rate-unit">100%</span>
-        </div>
-        <div class="row channel-row">
-          <label for="audioChannelMode">音を両耳にする</label>
-          <select id="audioChannelMode">
-            <option value="none" selected>なし</option>
-            <option value="left-to-stereo">左の音を両方へ</option>
-            <option value="right-to-stereo">右の音を両方へ</option>
-          </select>
+          </span>
         </div>
       </div>
 
-      <div class="control-block crop">
-        <div class="block-title">解像度クロップ</div>
-        <div class="aspect-presets" role="group" aria-label="アスペクト比">
-          <button class="aspect-btn active" type="button" data-aspect="free" aria-pressed="true">自由</button>
-          <button class="aspect-btn" type="button" data-aspect="1:1" aria-pressed="false">1:1</button>
-          <button class="aspect-btn" type="button" data-aspect="4:3" aria-pressed="false">4:3</button>
-          <button class="aspect-btn" type="button" data-aspect="16:9" aria-pressed="false">16:9</button>
-          <button class="aspect-btn" type="button" data-aspect="9:16" aria-pressed="false">9:16</button>
-        </div>
-        <div class="row split">
-          <div class="field">
-            <label for="outWidth">幅</label>
-            <input id="outWidth" type="number" min="1" step="1" />
-          </div>
-          <div class="field">
-            <label for="outHeight">高さ</label>
-            <input id="outHeight" type="number" min="1" step="1" />
-          </div>
-        </div>
-        <button id="useSource" class="ghost small block-action">元解像度</button>
-        <div class="hint">ドラッグで範囲調整。Shiftで一時的に比率固定。</div>
-      </div>
-
-      <div class="control-block transform">
-        <div class="block-title">回転・反転</div>
-        <div class="transform-grid">
+      <div class="control-block tools mode-normal-only">
+        <div class="block-title">編集ツール</div>
+        <div class="row tool-row">
           <button
             id="rotateLeft"
             class="ghost icon-btn"
@@ -226,9 +194,67 @@
               />
             </svg>
           </button>
+          <span id="transformState" class="transform-state">回転 0°</span>
         </div>
-        <div id="transformState" class="transform-state">回転 0°</div>
+        <div class="row speed-row">
+          <label for="playbackRate">速度</label>
+          <input id="playbackRate" class="num num-rate" type="number" min="0.25" max="4" step="0.05" value="1" />
+          <span class="rate-unit">x</span>
+        </div>
+        <div class="row repeat-row">
+          <span class="row-label" id="repeatLabel">繰り返し</span>
+          <div class="repeat-presets" role="group" aria-labelledby="repeatLabel">
+            <button class="repeat-btn active" type="button" data-repeat="1" aria-pressed="true">×1</button>
+            <button class="repeat-btn" type="button" data-repeat="2" aria-pressed="false">×2</button>
+            <button class="repeat-btn" type="button" data-repeat="3" aria-pressed="false">×3</button>
+          </div>
+        </div>
       </div>
+
+      <div class="control-block crop">
+        <div class="block-title">クロップ</div>
+        <div class="aspect-presets" role="group" aria-label="アスペクト比">
+          <button class="aspect-btn active" type="button" data-aspect="free" aria-pressed="true">自由</button>
+          <button class="aspect-btn" type="button" data-aspect="1:1" aria-pressed="false">1:1</button>
+          <button class="aspect-btn" type="button" data-aspect="4:3" aria-pressed="false">4:3</button>
+          <button class="aspect-btn" type="button" data-aspect="16:9" aria-pressed="false">16:9</button>
+          <button class="aspect-btn" type="button" data-aspect="9:16" aria-pressed="false">9:16</button>
+        </div>
+        <div class="row crop-size-row">
+          <label for="outWidth">幅</label>
+          <input id="outWidth" class="num num-px" type="number" min="1" step="1" />
+          <span class="rate-unit">×</span>
+          <label for="outHeight">高さ</label>
+          <input id="outHeight" class="num num-px" type="number" min="1" step="1" />
+          <button id="useSource" class="ghost small block-action">元解像度</button>
+        </div>
+        <div class="hint">ドラッグで範囲調整。Shiftで一時的に比率固定。</div>
+      </div>
+
+      <div class="control-block audio">
+        <div class="block-title">音声</div>
+        <div class="row volume-row">
+          <label for="volume">音量</label>
+          <input id="volume" type="range" min="0" max="200" step="5" value="100" />
+          <span id="volumeValue" class="rate-unit">100%</span>
+        </div>
+        <div class="row channel-row">
+          <label for="audioChannelMode">音を両耳にする</label>
+          <select id="audioChannelMode">
+            <option value="none" selected>なし</option>
+            <option value="left-to-stereo">左の音を両方へ</option>
+            <option value="right-to-stereo">右の音を両方へ</option>
+          </select>
+        </div>
+        <div class="row quality-row">
+          <label for="audioQuality">MP3音質</label>
+          <select id="audioQuality">
+            <option value="high" selected>高 (320kbps)</option>
+            <option value="medium">中 (192kbps)</option>
+          </select>
+        </div>
+      </div>
+
     </section>
 
     <section class="bulk-panel" id="bulkPanel">
@@ -241,7 +267,7 @@
           <button id="bulkClearMarkers" class="ghost small">すべてクリア</button>
         </div>
         <div class="bulk-auto-row">
-          <input id="bulkAutoSeconds" type="number" min="1" step="1" value="10" />
+          <input id="bulkAutoSeconds" class="num num-sec" type="number" min="1" step="1" value="10" />
           <span>秒ごとに自動分割</span>
           <button id="bulkAutoApply" class="ghost small">実行</button>
         </div>
@@ -271,7 +297,7 @@
         </button>
         <div class="batch-action-row">
           <label for="batchFrameSecond">秒位置</label>
-          <input id="batchFrameSecond" type="number" min="0" step="0.1" value="1.0" />
+          <input id="batchFrameSecond" class="num num-sec" type="number" min="0" step="0.1" value="1.0" />
           <button id="batchFrameExport" class="primary small" type="button">一括保存</button>
         </div>
       </div>
@@ -341,8 +367,8 @@
 
     <footer class="footer">
       <div class="footer-left">
-        <img class="footer-icon" src="icon.svg" alt="SILVA EDIT" />
-        <span class="footer-title">SILVA EDIT</span>
+        <img id="footerIcon" class="footer-icon" src="icon.svg" alt="SILVA EDIT" />
+        <span id="footerTitle" class="footer-title">SILVA EDIT</span>
         <div class="mode-toggle" role="group" aria-label="表示モード">
           <button class="mode-btn" type="button" data-mode="yuru" aria-pressed="true">
             ゆるシルバ

@@ -147,5 +147,17 @@ eq(api.toEvenSize(101), 102, 'even up');
 eq(api.toEvenSize(100), 100, 'even keep');
 eq(api.toEvenSize(853), 854, 'even 853');
 
+// --- repeatTimestamp（k 周目のタイムスタンプ = ts + k * segmentDuration）---
+eq(api.repeatTimestamp(1.5, 0, 10), 1.5, 'repeat round0');
+eq(api.repeatTimestamp(1.5, 1, 10), 11.5, 'repeat round1');
+eq(api.repeatTimestamp(1.5, 2, 10), 21.5, 'repeat round2');
+eq(api.repeatTimestamp(0, 2, 9.99), 19.98, 'repeat fractional');
+
+// --- withRepeatSuffix（×2 以上で末尾に -xN）---
+eq(api.withRepeatSuffix('movie-0p0-10p0.mp4', 1), 'movie-0p0-10p0.mp4', 'repeat suffix x1');
+eq(api.withRepeatSuffix('movie-0p0-10p0.mp4', 2), 'movie-0p0-10p0-x2.mp4', 'repeat suffix x2');
+eq(api.withRepeatSuffix('movie-0p0-10p0.mp4', 3), 'movie-0p0-10p0-x3.mp4', 'repeat suffix x3');
+eq(api.withRepeatSuffix('noext', 2), 'noext-x2', 'repeat suffix noext');
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -158,12 +158,16 @@ body:not(.has-video) .preview {
   grid-column: 1 / -1;
 }
 
-.control-block.crop {
+.control-block.tools {
   grid-column: 1;
 }
 
-.control-block.transform {
+.control-block.crop {
   grid-column: 2;
+}
+
+.control-block.audio {
+  grid-column: 1 / -1;
 }
 
 .actions {
@@ -234,6 +238,18 @@ body:not(.media-video) .export-mode {
 
 .footer-status {
   margin: 0;
+  min-width: 0;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-col {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  align-content: start;
 }
 
 /* ==========================================================================
@@ -667,48 +683,22 @@ button:disabled {
    Utilities
    ========================================================================== */
 .row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 10px;
   margin-bottom: 8px;
 }
 
-.row.split {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: stretch;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-areas:
-    "label label"
-    "input button";
-  align-items: center;
-  gap: 6px;
-}
-
-.field label {
-  grid-area: label;
-}
-
-.field input {
-  grid-area: input;
-  min-width: 0;
-}
-
-.field button {
-  grid-area: button;
-}
-
-.row label {
+.row label,
+.row-label {
   font-size: 12px;
   color: var(--muted);
 }
 
 .row input[type="number"] {
-  width: 100%;
+  width: auto;
+  min-width: 0;
   padding: 6px 8px;
   border-radius: 10px;
   border: 1px solid var(--line);
@@ -717,8 +707,26 @@ button:disabled {
   font-variant-numeric: tabular-nums;
 }
 
+/* 数値入力は伸ばさない。幅は用途ごとに固定する。 */
+.row input.num {
+  flex: 0 0 auto;
+}
+
+.row input.num-sec {
+  width: 6.5em;
+}
+
+.row input.num-px {
+  width: 5.5em;
+}
+
+.row input.num-rate {
+  width: 5em;
+}
+
 .row select {
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   padding: 6px 8px;
   border-radius: 10px;
   border: 1px solid var(--line);
@@ -728,9 +736,13 @@ button:disabled {
 }
 
 .row input[type="range"] {
-  width: 100%;
   accent-color: var(--accent);
   cursor: pointer;
+}
+
+.volume-row input[type="range"] {
+  flex: 1 1 100px;
+  min-width: 80px;
 }
 
 .rate-unit {
@@ -795,6 +807,11 @@ body.mode-bulk .control-block.trim {
   display: none;
 }
 
+/* 一括分割では編集ツールも隠れるため、残るクロップは全幅にする。 */
+body.mode-bulk .control-block.crop {
+  grid-column: 1 / -1;
+}
+
 /* 一括分割モードでは bulk-panel と一括書き出しを controls の上に */
 body.mode-bulk #bulkPanel { order: 1; }
 body.mode-bulk .actions { order: 2; }
@@ -856,6 +873,12 @@ body.media-audio .bulk-panel {
   background: var(--surface-input);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+
+.bulk-auto-row input.num-sec,
+.batch-action-row input.num-sec {
+  width: 6.5em;
+  flex: 0 0 auto;
 }
 
 .bulk-clip-list {
@@ -1267,7 +1290,83 @@ body.processing {
   margin-bottom: 8px;
 }
 
-.aspect-presets {
+/* サムネイル帯の再生ヘッド（timeupdate で left を動かす）。 */
+.trim-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 4px var(--accent-shadow);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 再生トランスポート（video 直下の常時表示行）。 */
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 6px 10px;
+}
+
+body:not(.has-video) .transport {
+  display: none;
+}
+
+.play-btn {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+}
+
+.play-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: var(--bg-ink);
+}
+
+.play-btn .icon-pause {
+  display: none;
+}
+
+.play-btn.playing .icon-play {
+  display: none;
+}
+
+.play-btn.playing .icon-pause {
+  display: block;
+}
+
+.seek-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* 開始/終了はラベル・入力・現在位置ボタンをひと組にして、折り返しは組の間でだけ起こす。 */
+.trim-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.seek-time {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.aspect-presets,
+.repeat-presets {
   display: flex;
   gap: 4px;
   padding: 3px;
@@ -1277,7 +1376,12 @@ body.processing {
   margin-bottom: 8px;
 }
 
-.aspect-btn {
+.repeat-presets {
+  margin-bottom: 0;
+}
+
+.aspect-btn,
+.repeat-btn {
   flex: 1;
   border-radius: 999px;
   padding: 6px 8px;
@@ -1289,16 +1393,15 @@ body.processing {
   line-height: 1.2;
 }
 
-.aspect-btn.active {
+.aspect-btn.active,
+.repeat-btn.active {
   background: var(--accent);
   color: #fff;
   box-shadow: 0 4px 10px var(--accent-shadow);
 }
 
-.transform-grid {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
+.tool-row .icon-btn {
+  flex: 0 0 auto;
 }
 
 .icon-btn {
@@ -1352,9 +1455,10 @@ body.processing {
 }
 
 .transform-state {
-  margin-top: 8px;
+  margin: 0 0 0 auto;
   font-size: 12px;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .row:last-child {
@@ -1367,8 +1471,7 @@ body.processing {
 }
 
 .block-action {
-  margin-top: 6px;
-  align-self: start;
+  margin-top: 0;
 }
 
 .small {
@@ -1446,7 +1549,7 @@ body.media-audio .canvas-wrap,
 body.media-audio #exportFrame,
 body.media-audio #exportFrameCrop,
 body.media-audio .control-block.crop,
-body.media-audio .control-block.transform,
+body.media-audio .control-block.tools,
 body.media-audio #exportVideo,
 body.media-audio .volume-row {
   display: none;
@@ -1459,28 +1562,40 @@ body.media-audio .controls {
 /* ==========================================================================
    Media
    ========================================================================== */
-@media (max-width: 560px) {
-  .row {
-    grid-template-columns: 1fr;
-  }
-
-  .row.split {
-    grid-template-columns: 1fr;
-  }
-
-  .field {
-    grid-template-columns: 1fr;
-  }
-
+@media (max-width: 619px) {
   .controls {
     grid-template-columns: 1fr;
+  }
+
+  /* 狭い幅では全ブロックを全幅にし、半分幅のブロックを作らない。 */
+  .control-block.trim,
+  .control-block.tools,
+  .control-block.crop,
+  .control-block.audio {
+    grid-column: 1 / -1;
   }
 
   .batch-action-row {
     grid-template-columns: 1fr;
   }
 
-  .transform-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .footer {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "left clear"
+      "status status";
+  }
+
+  .footer-left {
+    grid-area: left;
+  }
+
+  .footer-status {
+    grid-area: status;
+  }
+
+  .clear-video {
+    grid-area: clear;
+    justify-self: end;
   }
 }

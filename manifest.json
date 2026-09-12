@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "SILVA EDIT",
+  "name": "SILVA EDIT-dev",
   "version": "2.0",
   "description": "サイドパネルで動画/音声を簡単にトリミング・書き出し（まとめて画像保存・音を両耳にする・分割書き出し対応）。",
   "permissions": ["sidePanel"],
   "cross_origin_embedder_policy": { "value": "require-corp" },
   "cross_origin_opener_policy": { "value": "same-origin" },
   "action": {
-    "default_title": "SILVA EDIT",
+    "default_title": "SILVA EDIT-dev",
     "default_icon": {
       "16": "images/icon-16.png",
       "48": "images/icon-48.png",

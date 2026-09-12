@@ -49,8 +49,17 @@ const trimStartRange = document.getElementById('trimStartRange');
 const trimEndRange = document.getElementById('trimEndRange');
 const trimRangeFill = document.getElementById('trimRange');
 const trimThumbsCanvas = document.getElementById('trimThumbs');
+const trimScrubber = document.getElementById('trimScrubber');
+const trimPlayhead = document.getElementById('trimPlayhead');
 const trimStartLabel = document.getElementById('trimStartLabel');
 const trimEndLabel = document.getElementById('trimEndLabel');
+const playToggle = document.getElementById('playToggle');
+const seekBar = document.getElementById('seekBar');
+const seekTime = document.getElementById('seekTime');
+const playRange = document.getElementById('playRange');
+const repeatButtons = document.querySelectorAll('.repeat-btn');
+const footerTitle = document.getElementById('footerTitle');
+const footerIcon = document.getElementById('footerIcon');
 const outWidthInput = document.getElementById('outWidth');
 const outHeightInput = document.getElementById('outHeight');
 const setStartBtn = document.getElementById('setStart');
@@ -100,6 +109,7 @@ const state = {
   thumbnails: { generated: false, duration: 0, rotation: 0, generation: 0 },
   uiMode: 'normal',
   exportMode: 'quality',
+  repeat: 1,
   splitMarkers: [],
   batchFrameFiles: [],
   batchAudioFiles: [],
@@ -265,6 +275,24 @@ function setStatus(message) {
   logEl.textContent = message;
 }
 
+// フッターの表示名は manifest の name を使う（dev は SILVA EDIT-dev）。
+// chrome.runtime が無い環境では SILVA EDIT にフォールバックする。
+function applyAppName() {
+  let name = 'SILVA EDIT';
+  try {
+    if (
+      typeof chrome !== 'undefined' &&
+      chrome.runtime &&
+      typeof chrome.runtime.getManifest === 'function'
+    ) {
+      const manifestName = chrome.runtime.getManifest().name;
+      if (manifestName) name = manifestName;
+    }
+  } catch (error) { /* bench や素のブラウザでは既定名 */ }
+  if (footerTitle) footerTitle.textContent = name;
+  if (footerIcon) footerIcon.alt = name;
+}
+
 function setUIMode(mode) {
   const targetMode = mode === MODE_KIRI ? MODE_KIRI : MODE_YURU;
   document.body.classList.toggle('mode-kiri', targetMode === MODE_KIRI);
@@ -295,6 +323,7 @@ function setMediaMode(type) {
   document.body.classList.toggle('has-video', hasMedia);
   document.body.classList.toggle('media-audio', type === MEDIA_AUDIO);
   document.body.classList.toggle('media-video', type === MEDIA_VIDEO);
+  updateExportModeHint();
 }
 
 function setBatchButtonsEnabled() {
@@ -332,6 +361,9 @@ function setButtonsEnabled(enabled) {
   if (bulkExportAllMp3) bulkExportAllMp3.disabled = !enabled;
   if (bulkExportFrames) bulkExportFrames.disabled = !enabled || isAudio;
   aspectButtons.forEach((b) => { b.disabled = !enabled || isAudio; });
+  if (repeatButtons && repeatButtons.length) {
+    repeatButtons.forEach((b) => { b.disabled = !enabled; });
+  }
   editModeButtons.forEach((b) => {
     const mode = b.dataset.editMode;
     b.disabled = isProcessing() || (mode === UI_MODE_BULK ? (!enabled || isAudio) : false);
@@ -592,6 +624,165 @@ function buildAudioFilters({ includeVolume = true, speed = 1, channelMode = stat
   }
   filters.push(...buildAtempoFilters(speed));
   return filters;
+}
+
+// Repeat (same clip xN as one video)
+const REPEAT_DEFAULT = 1;
+
+function sanitizeRepeatCount(value) {
+  const count = Math.floor(Number(value));
+  if (count === 2 || count === 3) return count;
+  return REPEAT_DEFAULT;
+}
+
+function getRepeatCount() {
+  return sanitizeRepeatCount(state.repeat);
+}
+
+function setRepeat(count) {
+  state.repeat = sanitizeRepeatCount(count);
+  if (repeatButtons && repeatButtons.length) {
+    repeatButtons.forEach((button) => {
+      const isActive = Number(button.dataset.repeat) === state.repeat;
+      button.classList.toggle('active', isActive);
+      button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+  }
+  updateExportModeHint();
+}
+
+// 入力を書き換えずに現在のトリム区間を読む（表示更新などの非破壊用途）。
+function readTrimBounds() {
+  if (!state.duration) return null;
+  let start = parseFloat(startTimeInput?.value);
+  let end = parseFloat(endTimeInput?.value);
+  if (!Number.isFinite(start)) start = 0;
+  if (!Number.isFinite(end)) end = state.duration;
+  start = Math.min(Math.max(start, 0), state.duration);
+  end = Math.min(Math.max(end, 0), state.duration);
+  if (!(end > start)) return null;
+  return { start, end };
+}
+
+function getRepeatTotalSeconds() {
+  const bounds = readTrimBounds();
+  if (!bounds) return 0;
+  return (bounds.end - bounds.start) * getRepeatCount();
+}
+
+// Transport (custom playback controls under the video)
+const SEEK_BAR_MAX = 1000;
+let rangePlayActive = false;
+let seekDragging = false;
+let pendingSeekValue = null;
+let seekRafHandle = 0;
+
+function formatSeekTime(seconds) {
+  if (!Number.isFinite(seconds)) return '0:00.0';
+  const total = Math.max(0, seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total - mins * 60;
+  return `${mins}:${secs.toFixed(1).padStart(4, '0')}`;
+}
+
+function togglePlayback() {
+  if (!state.file || !state.duration) return;
+  if (video.paused || video.ended) {
+    rangePlayActive = false;
+    video.play().catch(() => {});
+  } else {
+    rangePlayActive = false;
+    video.pause();
+  }
+}
+
+function updatePlayToggle() {
+  if (!playToggle) return;
+  const playing = Boolean(state.file) && !video.paused && !video.ended;
+  playToggle.classList.toggle('playing', playing);
+  playToggle.setAttribute('aria-pressed', playing ? 'true' : 'false');
+  playToggle.setAttribute('aria-label', playing ? '一時停止' : '再生');
+}
+
+function updateSeekTrimBand() {
+  if (!seekBar) return;
+  const bounds = readTrimBounds();
+  if (!bounds || !(state.duration > 0)) {
+    seekBar.style.background = '';
+    return;
+  }
+  const left = (bounds.start / state.duration) * 100;
+  const right = (bounds.end / state.duration) * 100;
+  seekBar.style.background =
+    `linear-gradient(to right,` +
+    ` color-mix(in srgb, var(--accent) 18%, transparent) 0%,` +
+    ` color-mix(in srgb, var(--accent) 18%, transparent) ${left}%,` +
+    ` color-mix(in srgb, var(--accent) 55%, transparent) ${left}%,` +
+    ` color-mix(in srgb, var(--accent) 55%, transparent) ${right}%,` +
+    ` color-mix(in srgb, var(--accent) 18%, transparent) ${right}%,` +
+    ` color-mix(in srgb, var(--accent) 18%, transparent) 100%)`;
+}
+
+function updateTrimPlayhead() {
+  if (!trimPlayhead) return;
+  if (!(state.duration > 0) || !Number.isFinite(video.currentTime)) {
+    trimPlayhead.style.display = 'none';
+    return;
+  }
+  const ratio = Math.min(1, Math.max(0, video.currentTime / state.duration));
+  trimPlayhead.style.display = 'block';
+  trimPlayhead.style.left = `${ratio * 100}%`;
+}
+
+function updateSeekUI() {
+  const total = state.duration > 0 ? state.duration : 0;
+  const current = Number.isFinite(video.currentTime) ? Math.max(0, video.currentTime) : 0;
+  if (seekBar && !seekDragging && total > 0) {
+    seekBar.value = String(Math.round((Math.min(current, total) / total) * SEEK_BAR_MAX));
+  }
+  if (seekTime) {
+    seekTime.textContent = `${formatSeekTime(current)} / ${formatSeekTime(total)}`;
+  }
+  updateSeekTrimBand();
+  updateTrimPlayhead();
+}
+
+function applyPendingSeek() {
+  seekRafHandle = 0;
+  if (pendingSeekValue === null || !(state.duration > 0)) {
+    pendingSeekValue = null;
+    return;
+  }
+  const ratio = Math.min(1, Math.max(0, pendingSeekValue / SEEK_BAR_MAX));
+  pendingSeekValue = null;
+  try {
+    video.currentTime = ratio * state.duration;
+  } catch (error) { /* seek失敗は無視 */ }
+}
+
+function resetTransport() {
+  rangePlayActive = false;
+  seekDragging = false;
+  pendingSeekValue = null;
+  if (seekBar) {
+    seekBar.value = '0';
+    seekBar.style.background = '';
+  }
+  updatePlayToggle();
+  updateSeekUI();
+}
+
+function checkRangePlayStop() {
+  if (!rangePlayActive || !(state.duration > 0)) return;
+  const bounds = readTrimBounds();
+  const stopAt = bounds ? bounds.end : state.duration;
+  if (video.currentTime >= stopAt - 0.03) {
+    rangePlayActive = false;
+    video.pause();
+    try {
+      video.currentTime = bounds ? bounds.start : 0;
+    } catch (error) { /* seek失敗は無視 */ }
+  }
 }
 
 // Trim scrubber (dual range + thumbnail strip)
@@ -1543,6 +1734,7 @@ function loadFile(file) {
     clearVideo.disabled = false;
   }
   setButtonsEnabled(false);
+  resetTransport();
   video.src = state.objectUrl;
   video.load();
   applyPlaybackRate(state.playbackRate);
@@ -1590,6 +1782,8 @@ function clearVideoState() {
   updatePreviewLayout();
   state.transform = { rotation: 0, flipH: false, flipV: false };
   state.volume = DEFAULT_VOLUME;
+  setRepeat(REPEAT_DEFAULT);
+  resetTransport();
   applyPlaybackRate(DEFAULT_PLAYBACK_RATE);
   applyVolume(DEFAULT_VOLUME * 100);
   applyVideoTransform();
@@ -1753,11 +1947,19 @@ function updateExportModeHint() {
     exportModeHint.textContent = copyable
       ? '再エンコードせずに切り出すため一瞬で終わります。カット位置は最寄りのキーフレームに寄ります。'
       : 'クロップ/回転/速度/音量の変更があるため、今回は高品質書き出しになります。';
-    return;
+  } else {
+    exportModeHint.textContent = copyable
+      ? '尺を切るだけなら「高速」で画質そのまま・大幅に短時間で書き出せます。'
+      : '';
   }
-  exportModeHint.textContent = copyable
-    ? '尺を切るだけなら「高速」で画質そのまま・大幅に短時間で書き出せます。'
-    : '';
+  // 繰り返しは通常編集モードの動画書き出しにだけ付く。
+  const times = getRepeatCount();
+  if (times > 1 && state.uiMode === UI_MODE_NORMAL && state.mediaType === MEDIA_VIDEO) {
+    const total = getRepeatTotalSeconds();
+    const suffix = total > 0 ? `（合計 ${total.toFixed(1)} 秒）` : '';
+    const prefix = exportModeHint.textContent ? `${exportModeHint.textContent} ` : '';
+    exportModeHint.textContent = `${prefix}×${times} で繰り返して書き出します${suffix}。`;
+  }
 }
 
 let exportModeHintHandle = null;
@@ -2118,6 +2320,90 @@ async function muxWebCodecsVideoAudio({ videoBlob, audioBlob, onProgress } = {})
   });
 }
 
+// 繰り返し書き出し用のファイル名。×2 以上なら末尾に -xN を付ける。
+function getRepeatFileName(filename) {
+  const times = getRepeatCount();
+  if (!(times > 1)) return filename;
+  const api = self.SilvaWebCodecs;
+  if (api && typeof api.withRepeatSuffix === 'function') {
+    return api.withRepeatSuffix(filename, times);
+  }
+  const dot = filename.lastIndexOf('.');
+  if (dot > 0) {
+    return `${filename.slice(0, dot)}-x${times}${filename.slice(dot)}`;
+  }
+  return `${filename}-x${times}`;
+}
+
+// state.repeat>1 のとき完成 mp4 を N 回連結する。mediabunny の repeatMp4 を
+// 試し、失敗したら ffmpeg の -stream_loop にフォールバックし、それも失敗したら
+// 1 回分をそのまま返す（repeatFailed: true）。×1 は何もしない。
+async function applyRepeatIfNeeded(blob, { onProgress } = {}) {
+  const times = getRepeatCount();
+  if (!(times > 1)) return { blob, repeated: false, repeatFailed: false };
+  if (!blob || !blob.size) throw new Error('繰り返す映像がありません。');
+  const api = self.SilvaWebCodecs;
+  if (api && typeof api.repeatMp4 === 'function') {
+    const controller = new AbortController();
+    trackWebCodecsAbort(controller);
+    try {
+      throwWebCodecsCancelIfAborted(controller.signal);
+      const repeated = await api.repeatMp4(blob, times, {
+        signal: controller.signal,
+        onProgress,
+      });
+      return { blob: repeated, repeated: true, repeatFailed: false };
+    } catch (error) {
+      if (controller.signal.aborted || (api.isCancelError && api.isCancelError(error))) {
+        throw new FfmpegCancelError();
+      }
+      rememberFfmpegLog(`繰り返し連結（mediabunny）に失敗、ffmpeg へフォールバック: ${error?.message || error}`);
+    } finally {
+      untrackWebCodecsAbort(controller);
+    }
+  }
+  try {
+    const looped = await ffmpegQueue.run(async () => {
+      const ffmpeg = await ensureFfmpeg();
+      const inputName = 'repeat-once.mp4';
+      const outputName = 'repeat-out.mp4';
+      try {
+        throwIfFfmpegCanceled();
+        await safeDelete(ffmpeg, inputName);
+        await safeDelete(ffmpeg, outputName);
+        const buffer = await blob.arrayBuffer();
+        throwIfFfmpegCanceled();
+        await ffmpeg.writeFile(inputName, new Uint8Array(buffer));
+        throwIfFfmpegCanceled();
+        await execFfmpegWithProgress(
+          ffmpeg,
+          [
+            '-stream_loop', `${times - 1}`,
+            '-i', inputName,
+            '-c', 'copy',
+            '-movflags', '+faststart',
+            outputName,
+          ],
+          onProgress
+        );
+        const data = await ffmpeg.readFile(outputName);
+        const output = toBlob(data, 'video/mp4');
+        if (!output.size) {
+          throw new Error('出力が空になりました。');
+        }
+        return output;
+      } finally {
+        await safeDelete(ffmpeg, inputName);
+        await safeDelete(ffmpeg, outputName);
+      }
+    });
+    return { blob: looped, repeated: true, repeatFailed: false };
+  } catch (error) {
+    if (isFfmpegCancelError(error)) throw error;
+    return { blob, repeated: false, repeatFailed: true };
+  }
+}
+
 // 音声だけを既存フィルタ（buildAudioFilters: atempo・音量・チャンネル）のまま
 // m4a（AAC）で切り出す。映像は WebCodecs 側が担当する。
 async function exportWebCodecsAudioOnly({ start, duration, speed, onProgress } = {}) {
@@ -2200,25 +2486,32 @@ async function exportVideoWithWebCodecs({ start, end, onProgress } = {}) {
         throw error;
       }
     };
-    const logAndDownload = (finalBlob, videoResult, audioNote) => {
+    // 書き出し 0〜0.95、繰り返し連結 0.95〜1.0。呼び出し側が 0.95 倍済み。
+    const logAndDownload = async (finalBlob, videoResult, audioNote) => {
       rememberFfmpegLog(
         `WebCodecs 経路で書き出し (${videoResult.width}x${videoResult.height} ${videoResult.codec}/${videoResult.hardwareAcceleration} 映像${Math.round(videoResult.blob.size / 1024)}KB ${audioNote} audioMode:${videoResult.audioMode})`
       );
       const clip = formatClipLabel(start, end);
-      downloadBlob(finalBlob, `${baseName()}-${clip}.mp4`);
+      const { blob, repeatFailed } = await applyRepeatIfNeeded(finalBlob, {
+        onProgress: (progress) => {
+          if (onProgress) onProgress(0.95 + progress * 0.05);
+        },
+      });
+      downloadBlob(blob, getRepeatFileName(`${baseName()}-${clip}.mp4`));
+      return repeatFailed;
     };
     if (audioFilters.length === 0) {
       const videoResult = await runVideo('auto', 0, 0.98);
       throwWebCodecsCancelIfAborted(controller.signal);
       if (videoResult.audioIncluded || !needAudio) {
         // ffmpeg を一切使わない（ensureFfmpeg も呼ばない）。
-        if (onProgress) onProgress(1);
-        logAndDownload(
+        const repeatFailed = await logAndDownload(
           videoResult.blob,
           videoResult,
           videoResult.audioIncluded ? '音声あり' : '音声なし'
         );
-        return;
+        if (onProgress) onProgress(1);
+        return { repeatFailed };
       }
       // 音声トラックはあるが取り込めなかった。映像は使い回し、音声と mux だけ ffmpeg で行う。
       const audioBlob = await exportWebCodecsAudioOnly({
@@ -2237,9 +2530,9 @@ async function exportVideoWithWebCodecs({ start, end, onProgress } = {}) {
           if (onProgress) onProgress(0.99 + progress * 0.01);
         },
       });
+      const repeatFailed = await logAndDownload(finalBlob, videoResult, `音声あり(ffmpeg:${Math.round(audioBlob.size / 1024)}KB)`);
       if (onProgress) onProgress(1);
-      logAndDownload(finalBlob, videoResult, `音声あり(ffmpeg:${Math.round(audioBlob.size / 1024)}KB)`);
-      return;
+      return { repeatFailed };
     }
     // 音声に手を入れる場合: 従来どおり audio:'none' + ffmpeg 音声 + mux。
     let audioBlob = null;
@@ -2263,12 +2556,13 @@ async function exportVideoWithWebCodecs({ start, end, onProgress } = {}) {
         if (onProgress) onProgress(0.95 + progress * 0.05);
       },
     });
-    if (onProgress) onProgress(1);
-    logAndDownload(
+    const repeatFailed = await logAndDownload(
       finalBlob,
       videoResult,
       audioBlob ? `音声あり(ffmpeg:${Math.round(audioBlob.size / 1024)}KB)` : '音声なし'
     );
+    if (onProgress) onProgress(1);
+    return { repeatFailed };
   } finally {
     untrackWebCodecsAbort(controller);
   }
@@ -2413,11 +2707,13 @@ async function runBulkExportWebCodecsMp4(clips, { dirHandle } = {}) {
 // Export actions
 async function exportVideoWithFfmpeg({ onProgress } = {}) {
   const { start, end } = sanitizeTimes();
+  // 書き出し 0〜0.95、繰り返し連結 0.95〜1.0。
+  const exportProgress = onProgress ? (progress) => onProgress(progress * 0.95) : undefined;
+  const repeatProgress = onProgress ? (progress) => onProgress(0.95 + progress * 0.05) : undefined;
   // 再エンコードが必要なときだけ WebCodecs 経路を試す（高速=c copy は現行のまま）。
   if (!isStreamCopyRequested()) {
     try {
-      await exportVideoWithWebCodecs({ start, end, onProgress });
-      return;
+      return await exportVideoWithWebCodecs({ start, end, onProgress: exportProgress });
     } catch (error) {
       if (isFfmpegCancelError(error)) {
         throw error;
@@ -2498,10 +2794,14 @@ async function exportVideoWithFfmpeg({ onProgress } = {}) {
       : null,
     outputName,
     outputType: 'video/mp4',
-    onProgress,
+    onProgress: exportProgress,
   });
   const clip = formatClipLabel(start, end);
-  downloadBlob(blob, `${baseName()}-${clip}.mp4`);
+  const { blob: finalBlob, repeatFailed } = await applyRepeatIfNeeded(blob, {
+    onProgress: repeatProgress,
+  });
+  downloadBlob(finalBlob, getRepeatFileName(`${baseName()}-${clip}.mp4`));
+  return { repeatFailed };
 }
 
 async function exportAudioWithFfmpeg({ onProgress } = {}) {
@@ -2693,6 +2993,7 @@ function setEditMode(mode) {
   }
   updateInfo();
   setBatchButtonsEnabled();
+  updateExportModeHint();
 }
 
 function sortAndDedupeMarkers(markers, duration) {
@@ -3707,6 +4008,13 @@ if (cropBox) {
 
 window.addEventListener('keydown', (event) => {
   if (event.key === 'Shift') state.shiftHeld = true;
+  if ((event.code === 'Space' || event.key === ' ') && !event.defaultPrevented) {
+    const target = event.target;
+    if (target && target.closest && target.closest('input, select, textarea, button')) return;
+    if (!state.file || !state.duration) return;
+    event.preventDefault();
+    togglePlayback();
+  }
 });
 window.addEventListener('keyup', (event) => {
   if (event.key === 'Shift') state.shiftHeld = false;
@@ -3834,6 +4142,7 @@ window.addEventListener('resize', () => {
 
 video.addEventListener('loadedmetadata', () => {
   state.duration = video.duration;
+  resetTransport();
   startTimeInput.value = '0.0';
   endTimeInput.value = state.duration.toFixed(1);
   updateInfo();
@@ -3859,24 +4168,46 @@ video.addEventListener('loadedmetadata', () => {
   }
   setButtonsEnabled(true);
   updateTransformUI();
+  updateSeekUI();
+  updateExportModeHint();
   if (state.uiMode === UI_MODE_BULK) {
     renderClipList();
     drawBulkTimeline();
   }
 });
 
-video.addEventListener('play', startRenderLoop);
+video.addEventListener('play', () => {
+  startRenderLoop();
+  updatePlayToggle();
+});
 video.addEventListener('pause', () => {
   stopRenderLoop();
   drawFrame();
+  updatePlayToggle();
 });
-video.addEventListener('seeked', drawFrame);
+video.addEventListener('ended', () => {
+  if (rangePlayActive) {
+    rangePlayActive = false;
+    const bounds = readTrimBounds();
+    try {
+      video.currentTime = bounds ? bounds.start : 0;
+    } catch (error) { /* seek失敗は無視 */ }
+  }
+  updatePlayToggle();
+  updateSeekUI();
+});
+video.addEventListener('seeked', () => {
+  drawFrame();
+  updateSeekUI();
+});
 video.addEventListener('loadeddata', drawFrame);
 video.addEventListener('canplay', drawFrame);
 video.addEventListener('timeupdate', () => {
   if (state.duration) {
     durationEl.textContent = `${formatTime(video.currentTime)} / ${formatTime(state.duration)}`;
   }
+  checkRangePlayStop();
+  updateSeekUI();
   if (state.uiMode === UI_MODE_BULK) drawBulkTimeline();
 });
 
@@ -3920,6 +4251,74 @@ if (trimEndRange) {
     if (trimStartRange) trimStartRange.classList.remove('is-front');
     trimEndRange.classList.add('is-front');
     if (video && !video.paused) video.pause();
+  });
+}
+
+// サムネイル帯のクリックでシークする（range 入力のドラッグとは競合しないよう
+// pointerup 時の移動量が小さいときだけ。つまみ上の操作は無視する）。
+if (trimScrubber) {
+  let scrubDownPos = null;
+  trimScrubber.addEventListener('pointerdown', (event) => {
+    scrubDownPos = { x: event.clientX, y: event.clientY };
+  });
+  trimScrubber.addEventListener('pointerup', (event) => {
+    if (!scrubDownPos) return;
+    const moved = Math.hypot(event.clientX - scrubDownPos.x, event.clientY - scrubDownPos.y);
+    scrubDownPos = null;
+    if (moved > 6) return;
+    if (event.target && event.target.closest && event.target.closest('.trim-range-input')) return;
+    if (!(state.duration > 0)) return;
+    const rect = trimScrubber.getBoundingClientRect();
+    if (!rect.width) return;
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    try {
+      video.currentTime = ratio * state.duration;
+    } catch (error) { /* seek失敗は無視 */ }
+  });
+}
+
+if (playToggle) {
+  playToggle.addEventListener('click', togglePlayback);
+}
+
+if (playRange) {
+  playRange.addEventListener('click', () => {
+    if (!state.file || !state.duration) {
+      setStatus('先に動画ファイルを読み込んでください。');
+      return;
+    }
+    const { start } = sanitizeTimes();
+    rangePlayActive = true;
+    try {
+      video.currentTime = start;
+    } catch (error) { /* seek失敗は無視 */ }
+    video.play().catch(() => {
+      rangePlayActive = false;
+    });
+  });
+}
+
+if (seekBar) {
+  seekBar.addEventListener('input', () => {
+    // ドラッグ中はシーク先へ即時反映するが、rAF で間引く。
+    pendingSeekValue = Number(seekBar.value);
+    if (!seekRafHandle) {
+      seekRafHandle = requestAnimationFrame(applyPendingSeek);
+    }
+  });
+  seekBar.addEventListener('pointerdown', () => {
+    seekDragging = true;
+  });
+  window.addEventListener('pointerup', () => {
+    seekDragging = false;
+  });
+}
+
+if (repeatButtons && repeatButtons.length) {
+  repeatButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      setRepeat(button.dataset.repeat);
+    });
   });
 }
 
@@ -4013,13 +4412,17 @@ exportVideoBtn.addEventListener('click', async () => {
   try {
     const progressLabel = 'MP4を書き出し中';
     setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: 0 });
-    await exportVideoWithFfmpeg({
+    const result = await exportVideoWithFfmpeg({
       onProgress: (progress) => {
         setProgress({ done: 0, total: 1, label: progressLabel, itemProgress: progress });
       },
     });
     setProgress({ done: 1, total: 1, label: progressLabel });
-    setStatus('MP4の書き出しが完了しました。');
+    setStatus(
+      result && result.repeatFailed
+        ? '繰り返しに失敗したため 1 回分を保存しました。'
+        : 'MP4の書き出しが完了しました。'
+    );
   } catch (error) {
     setStatus(error.message || 'MP4の書き出しに失敗しました。');
   } finally {
@@ -4122,6 +4525,9 @@ setMediaMode(null);
 applyPlaybackRate(DEFAULT_PLAYBACK_RATE);
 applyVolume(DEFAULT_VOLUME * 100);
 setAudioChannelMode(CHANNEL_MODE_NONE);
+setRepeat(REPEAT_DEFAULT);
+applyAppName();
+resetTransport();
 applyVideoTransform();
 updateTransformUI();
 updateBatchSummaries();

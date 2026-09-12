@@ -871,10 +871,217 @@
     }
   }
 
+  // k 周目（0 始まり）のパケットタイムスタンプ。純粋関数（テスト用）。
+  function repeatTimestamp(timestamp, round, segmentDuration) {
+    return Number(timestamp) + Number(round) * Number(segmentDuration);
+  }
+
+  // 繰り返し書き出し用のファイル名。times>1 のとき末尾（拡張子の前）に
+  // -xN を付ける。純粋関数（テスト用）。
+  function withRepeatSuffix(filename, times) {
+    var count = Math.floor(Number(times));
+    if (!(count > 1)) return String(filename);
+    var name = String(filename);
+    var dot = name.lastIndexOf('.');
+    if (dot > 0) {
+      return name.slice(0, dot) + '-x' + count + name.slice(dot);
+    }
+    return name + '-x' + count;
+  }
+
+  // 完成済み mp4（1 回分）を N 回連結した 1 本の mp4 を作る。再エンコードしない。
+  // 全トラックのパケットを EncodedPacketSink で列挙し、k 周目は
+  // clone({ timestamp: timestamp + k * segmentDuration }) でずらして書く。
+  // segmentDuration はトラックの computeDuration() と観測した最終パケット終端の
+  // 大きい方。初回 add のみ { decoderConfig } を渡す。fastStart: 'in-memory'。
+  async function repeatMp4(blob, times, options) {
+    var opts = options || {};
+    var count = Math.floor(Number(times));
+    var onProgress = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+    var signal = opts.signal || null;
+    if (!blob || !blob.size) throw new Error('繰り返す映像がありません。');
+    if (!(count > 1)) return blob;
+    var MB = getMediabunny();
+    if (!MB) throw new Error('Mediabunny が読み込まれていません。');
+    if (
+      !MB.EncodedPacketSink ||
+      !MB.EncodedPacket ||
+      !MB.EncodedVideoPacketSource ||
+      !MB.EncodedAudioPacketSource ||
+      !MB.Output ||
+      !MB.Mp4OutputFormat ||
+      !MB.BufferTarget
+    ) {
+      throw new Error('Mediabunny の必要な API がありません。');
+    }
+    throwIfAborted(signal);
+
+    var input = createInput(MB, blob);
+    var output = null;
+    var outputStarted = false;
+    var finalized = false;
+    try {
+      var videoTracks = await input.getVideoTracks();
+      var audioTracks = await input.getAudioTracks();
+      throwIfAborted(signal);
+      if (!videoTracks.length) throw new Error('映像トラックが見つかりません。');
+
+      // パケット収集と区間長の確定。packets() は decode 順に列挙する。
+      var entries = [];
+      var trackList = videoTracks
+        .map(function (track) {
+          return { kind: 'video', track: track };
+        })
+        .concat(
+          audioTracks.map(function (track) {
+            return { kind: 'audio', track: track };
+          })
+        );
+      for (var t = 0; t < trackList.length; t++) {
+        throwIfAborted(signal);
+        var track = trackList[t].track;
+        var sink = new MB.EncodedPacketSink(track);
+        var packets = [];
+        var maxEnd = 0;
+        for await (var packet of sink.packets()) {
+          // 0 以前に終わるパケットは出さない（音声コピー経路と同程度の扱い）。
+          if (packet.timestamp + packet.duration <= 0) continue;
+          packets.push(packet);
+          var packetEnd = packet.timestamp + packet.duration;
+          if (packetEnd > maxEnd) maxEnd = packetEnd;
+        }
+        var computed = 0;
+        try {
+          if (track && typeof track.computeDuration === 'function') {
+            computed = (await track.computeDuration()) || 0;
+          }
+        } catch (error) {
+          computed = 0;
+        }
+        var segmentDuration = Math.max(Number(computed) || 0, maxEnd);
+        if (!(segmentDuration > 0)) {
+          throw new Error('区間の長さを取得できません。');
+        }
+        var codec = null;
+        try {
+          if (track && typeof track.getCodec === 'function') {
+            codec = await track.getCodec();
+          } else {
+            codec = track.codec || null;
+          }
+        } catch (error) {
+          codec = null;
+        }
+        if (!codec) throw new Error('トラックのコーデックを取得できません。');
+        var decoderConfig = null;
+        try {
+          if (track && typeof track.getDecoderConfig === 'function') {
+            decoderConfig = await track.getDecoderConfig();
+          }
+        } catch (error) {
+          decoderConfig = null;
+        }
+        entries.push({
+          kind: trackList[t].kind,
+          codec: codec,
+          decoderConfig: decoderConfig,
+          packets: packets,
+          segmentDuration: segmentDuration,
+          source: null,
+        });
+      }
+      throwIfAborted(signal);
+
+      var target = new MB.BufferTarget();
+      output = new MB.Output({
+        format: new MB.Mp4OutputFormat({ fastStart: 'in-memory' }),
+        target: target,
+      });
+      for (var e = 0; e < entries.length; e++) {
+        var entry = entries[e];
+        if (entry.kind === 'video') {
+          entry.source = new MB.EncodedVideoPacketSource(entry.codec);
+          output.addVideoTrack(entry.source);
+        } else {
+          entry.source = new MB.EncodedAudioPacketSource(entry.codec);
+          output.addAudioTrack(
+            entry.source,
+            entry.decoderConfig ? { decoderConfig: entry.decoderConfig } : undefined
+          );
+        }
+      }
+      await output.start();
+      outputStarted = true;
+      throwIfAborted(signal);
+
+      var totalWrites = 0;
+      for (var w = 0; w < entries.length; w++) {
+        totalWrites += entries[w].packets.length * count;
+      }
+      totalWrites = Math.max(1, totalWrites);
+      var written = 0;
+      for (var s = 0; s < entries.length; s++) {
+        var job = entries[s];
+        var firstAdd = true;
+        for (var round = 0; round < count; round++) {
+          for (var p = 0; p < job.packets.length; p++) {
+            throwIfAborted(signal);
+            var original = job.packets[p];
+            // clone は type・sequenceNumber・sideData を維持する。
+            var shifted = original.clone({
+              timestamp: repeatTimestamp(original.timestamp, round, job.segmentDuration),
+            });
+            await job.source.add(
+              shifted,
+              firstAdd && job.decoderConfig ? { decoderConfig: job.decoderConfig } : undefined
+            );
+            firstAdd = false;
+            written++;
+            if (onProgress) {
+              onProgress(clamp01((written / totalWrites) * 0.98));
+            }
+          }
+        }
+        job.source.close();
+      }
+      throwIfAborted(signal);
+
+      await output.finalize();
+      finalized = true;
+      if (onProgress) {
+        onProgress(1);
+      }
+      var buffer = target.buffer;
+      if (!buffer || !buffer.byteLength) {
+        throw new Error('繰り返し書き出しの結果が空になりました。');
+      }
+      return new Blob([buffer], { type: 'video/mp4' });
+    } catch (error) {
+      // キャンセル時は finalize せず Output を捨てる（AbortError を投げる）。
+      if (output && outputStarted && !finalized) {
+        try {
+          await output.cancel();
+        } catch (ignored) {
+          // 中断・失敗時の後始末の失敗は無視する。
+        }
+      }
+      if (signal && signal.aborted) {
+        var abortError = new Error('処理を中断しました。');
+        abortError.name = 'AbortError';
+        throw abortError;
+      }
+      if (isCancelError(error)) throw error;
+      throw error;
+    } finally {
+      if (input && typeof input.dispose === 'function') input.dispose();
+    }
+  }
+
   var api = {
     isSupported: isSupported,
     hasAudio: hasAudio,
     exportVideo: exportVideo,
+    repeatMp4: repeatMp4,
     isCancelError: isCancelError,
     // 純粋関数（node の簡易テスト用に公開。DOM・WebCodecs 不要）。
     getDisplaySizeFor: getDisplaySizeFor,
@@ -890,6 +1097,8 @@
     selectAvcCodecStrings: selectAvcCodecStrings,
     toEvenSize: toEvenSize,
     normalizeRotation: normalizeRotation,
+    repeatTimestamp: repeatTimestamp,
+    withRepeatSuffix: withRepeatSuffix,
     MAX_OUTPUT_FPS: MAX_OUTPUT_FPS,
   };
 
