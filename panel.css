@@ -1197,13 +1197,19 @@ body.processing {
 }
 
 /* Trim scrubber (iOS-like dual range) */
+/* タイムラインの外側。再生ヘッドはこの上下の余白ぶんタイムラインより長く出す。 */
+.trim-scrubber-wrap {
+  position: relative;
+  padding: 18px 0 10px;
+  touch-action: none;
+  cursor: pointer;
+}
+
 .trim-scrubber {
   position: relative;
   width: 100%;
   height: 60px;
-  touch-action: none;
-  cursor: pointer;
-  margin-bottom: 6px;
+  margin-bottom: 0;
   border-radius: 12px;
   overflow: hidden;
   background: var(--canvas-bg);
@@ -1299,28 +1305,51 @@ body.processing {
   top: 0;
   bottom: 0;
   left: 0;
-  width: 2px;
-  margin-left: -1px;
+  width: 3px;
+  margin-left: -1.5px;
   background: var(--playhead);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.6);
   pointer-events: none;
   z-index: 5;
 }
 
-/* 再生ヘッドの頭。ここだけ掴めるようにして、トリムつまみの操作を邪魔しない。 */
+/* 下端の丸。ここも掴める。 */
+.trim-playhead::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: var(--playhead);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  pointer-events: auto;
+  cursor: ew-resize;
+}
+
+/* 再生ヘッドの頭。タイムラインの上にはみ出させて、指でも掴める大きさにする。 */
 .trim-playhead-head {
   position: absolute;
   top: 0;
   left: 50%;
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  height: 20px;
   transform: translateX(-50%);
   background: var(--playhead);
-  border: 1px solid rgba(255, 255, 255, 0.7);
-  border-radius: 3px 3px 7px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: 5px 5px 10px 10px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   pointer-events: auto;
   cursor: ew-resize;
+}
+
+/* 見た目より広い当たり判定。 */
+.trim-playhead-head::after {
+  content: '';
+  position: absolute;
+  inset: -8px -10px;
 }
 
 /* 再生トランスポート（video 直下の常時表示行）。 */

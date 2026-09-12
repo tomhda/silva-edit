@@ -106,17 +106,19 @@
     <section class="controls">
       <div class="control-block trim">
         <div class="block-title">トリミング</div>
+        <div class="trim-scrubber-wrap" id="trimScrubberWrap">
         <div class="trim-scrubber" id="trimScrubber">
           <canvas id="trimThumbs" class="trim-thumbs" aria-hidden="true"></canvas>
           <div class="trim-track" aria-hidden="true"></div>
           <div class="trim-range" id="trimRange" aria-hidden="true"></div>
-          <div id="trimPlayhead" class="trim-playhead" aria-hidden="true"><span class="trim-playhead-head"></span></div>
           <input id="trimStartRange" class="trim-range-input trim-range-start"
                  type="range" min="0" max="1000" step="1" value="0"
                  aria-label="開始位置" />
           <input id="trimEndRange" class="trim-range-input trim-range-end"
                  type="range" min="0" max="1000" step="1" value="1000"
                  aria-label="終了位置" />
+        </div>
+        <div id="trimPlayhead" class="trim-playhead" aria-hidden="true"><span class="trim-playhead-head"></span></div>
         </div>
         <div class="trim-times">
           <span id="trimStartLabel">00:00.0</span>

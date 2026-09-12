@@ -50,6 +50,7 @@ const trimEndRange = document.getElementById('trimEndRange');
 const trimRangeFill = document.getElementById('trimRange');
 const trimThumbsCanvas = document.getElementById('trimThumbs');
 const trimScrubber = document.getElementById('trimScrubber');
+const trimScrubberWrap = document.getElementById('trimScrubberWrap');
 const trimPlayhead = document.getElementById('trimPlayhead');
 const trimStartLabel = document.getElementById('trimStartLabel');
 const trimEndLabel = document.getElementById('trimEndLabel');
@@ -4229,7 +4230,8 @@ if (trimEndRange) {
 // pointerup 時の移動量が小さいときだけ。つまみ上の操作は無視する）。
 // タイムライン上の再生ヘッドがシークバー。つまみ以外を押した位置へ即シークし、
 // そのままドラッグで追従する（iOS やビデオ編集ソフトの再生ヘッドと同じ感覚）。
-if (trimScrubber) {
+// ハンドラは外側のラッパーに付ける（はみ出した頭や下端の丸も掴めるように）。
+if (trimScrubber && trimScrubberWrap) {
   let scrubWasPlaying = false;
   const seekToClientX = (clientX) => {
     if (!(state.duration > 0)) return;
@@ -4240,7 +4242,7 @@ if (trimScrubber) {
       seekRafHandle = requestAnimationFrame(applyPendingSeek);
     }
   };
-  trimScrubber.addEventListener('pointerdown', (event) => {
+  trimScrubberWrap.addEventListener('pointerdown', (event) => {
     if (event.button !== undefined && event.button !== 0) return;
     // トリムのつまみ（range input の thumb）はそちらに任せる。
     if (event.target && event.target.closest && event.target.closest('.trim-range-input')) return;
@@ -4250,12 +4252,12 @@ if (trimScrubber) {
     scrubWasPlaying = !video.paused && !video.ended;
     if (scrubWasPlaying) video.pause();
     try {
-      trimScrubber.setPointerCapture(event.pointerId);
+      trimScrubberWrap.setPointerCapture(event.pointerId);
     } catch (error) { /* capture 非対応は無視 */ }
     seekToClientX(event.clientX);
     event.preventDefault();
   });
-  trimScrubber.addEventListener('pointermove', (event) => {
+  trimScrubberWrap.addEventListener('pointermove', (event) => {
     if (!seekDragging) return;
     seekToClientX(event.clientX);
   });
@@ -4263,15 +4265,15 @@ if (trimScrubber) {
     if (!seekDragging) return;
     seekDragging = false;
     try {
-      trimScrubber.releasePointerCapture(event.pointerId);
+      trimScrubberWrap.releasePointerCapture(event.pointerId);
     } catch (error) { /* 未 capture は無視 */ }
     if (scrubWasPlaying) {
       scrubWasPlaying = false;
       video.play().catch(() => {});
     }
   };
-  trimScrubber.addEventListener('pointerup', endScrub);
-  trimScrubber.addEventListener('pointercancel', endScrub);
+  trimScrubberWrap.addEventListener('pointerup', endScrub);
+  trimScrubberWrap.addEventListener('pointercancel', endScrub);
 }
 
 if (playToggle) {
