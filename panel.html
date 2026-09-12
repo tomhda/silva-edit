@@ -66,7 +66,6 @@
             <path d="M7 5h4v14H7zM13 5h4v14h-4z" />
           </svg>
         </button>
-        <input id="seekBar" class="seek-bar" type="range" min="0" max="1000" step="1" value="0" aria-label="シーク" />
         <span id="seekTime" class="seek-time">0:00.0 / 0:00.0</span>
         <button id="playRange" class="ghost small" type="button">区間を再生</button>
       </div>
@@ -111,7 +110,7 @@
           <canvas id="trimThumbs" class="trim-thumbs" aria-hidden="true"></canvas>
           <div class="trim-track" aria-hidden="true"></div>
           <div class="trim-range" id="trimRange" aria-hidden="true"></div>
-          <div id="trimPlayhead" class="trim-playhead" aria-hidden="true"></div>
+          <div id="trimPlayhead" class="trim-playhead" aria-hidden="true"><span class="trim-playhead-head"></span></div>
           <input id="trimStartRange" class="trim-range-input trim-range-start"
                  type="range" min="0" max="1000" step="1" value="0"
                  aria-label="開始位置" />

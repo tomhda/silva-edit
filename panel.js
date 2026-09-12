@@ -54,7 +54,6 @@ const trimPlayhead = document.getElementById('trimPlayhead');
 const trimStartLabel = document.getElementById('trimStartLabel');
 const trimEndLabel = document.getElementById('trimEndLabel');
 const playToggle = document.getElementById('playToggle');
-const seekBar = document.getElementById('seekBar');
 const seekTime = document.getElementById('seekTime');
 const playRange = document.getElementById('playRange');
 const repeatButtons = document.querySelectorAll('.repeat-btn');
@@ -671,7 +670,6 @@ function getRepeatTotalSeconds() {
 }
 
 // Transport (custom playback controls under the video)
-const SEEK_BAR_MAX = 1000;
 let rangePlayActive = false;
 let seekDragging = false;
 let pendingSeekValue = null;
@@ -704,25 +702,6 @@ function updatePlayToggle() {
   playToggle.setAttribute('aria-label', playing ? '一時停止' : '再生');
 }
 
-function updateSeekTrimBand() {
-  if (!seekBar) return;
-  const bounds = readTrimBounds();
-  if (!bounds || !(state.duration > 0)) {
-    seekBar.style.background = '';
-    return;
-  }
-  const left = (bounds.start / state.duration) * 100;
-  const right = (bounds.end / state.duration) * 100;
-  seekBar.style.background =
-    `linear-gradient(to right,` +
-    ` color-mix(in srgb, var(--accent) 18%, transparent) 0%,` +
-    ` color-mix(in srgb, var(--accent) 18%, transparent) ${left}%,` +
-    ` color-mix(in srgb, var(--accent) 55%, transparent) ${left}%,` +
-    ` color-mix(in srgb, var(--accent) 55%, transparent) ${right}%,` +
-    ` color-mix(in srgb, var(--accent) 18%, transparent) ${right}%,` +
-    ` color-mix(in srgb, var(--accent) 18%, transparent) 100%)`;
-}
-
 function updateTrimPlayhead() {
   if (!trimPlayhead) return;
   if (!(state.duration > 0) || !Number.isFinite(video.currentTime)) {
@@ -737,13 +716,9 @@ function updateTrimPlayhead() {
 function updateSeekUI() {
   const total = state.duration > 0 ? state.duration : 0;
   const current = Number.isFinite(video.currentTime) ? Math.max(0, video.currentTime) : 0;
-  if (seekBar && !seekDragging && total > 0) {
-    seekBar.value = String(Math.round((Math.min(current, total) / total) * SEEK_BAR_MAX));
-  }
   if (seekTime) {
     seekTime.textContent = `${formatSeekTime(current)} / ${formatSeekTime(total)}`;
   }
-  updateSeekTrimBand();
   updateTrimPlayhead();
 }
 
@@ -753,7 +728,7 @@ function applyPendingSeek() {
     pendingSeekValue = null;
     return;
   }
-  const ratio = Math.min(1, Math.max(0, pendingSeekValue / SEEK_BAR_MAX));
+  const ratio = Math.min(1, Math.max(0, pendingSeekValue));
   pendingSeekValue = null;
   try {
     video.currentTime = ratio * state.duration;
@@ -764,10 +739,6 @@ function resetTransport() {
   rangePlayActive = false;
   seekDragging = false;
   pendingSeekValue = null;
-  if (seekBar) {
-    seekBar.value = '0';
-    seekBar.style.background = '';
-  }
   updatePlayToggle();
   updateSeekUI();
 }
@@ -4256,25 +4227,51 @@ if (trimEndRange) {
 
 // サムネイル帯のクリックでシークする（range 入力のドラッグとは競合しないよう
 // pointerup 時の移動量が小さいときだけ。つまみ上の操作は無視する）。
+// タイムライン上の再生ヘッドがシークバー。つまみ以外を押した位置へ即シークし、
+// そのままドラッグで追従する（iOS やビデオ編集ソフトの再生ヘッドと同じ感覚）。
 if (trimScrubber) {
-  let scrubDownPos = null;
-  trimScrubber.addEventListener('pointerdown', (event) => {
-    scrubDownPos = { x: event.clientX, y: event.clientY };
-  });
-  trimScrubber.addEventListener('pointerup', (event) => {
-    if (!scrubDownPos) return;
-    const moved = Math.hypot(event.clientX - scrubDownPos.x, event.clientY - scrubDownPos.y);
-    scrubDownPos = null;
-    if (moved > 6) return;
-    if (event.target && event.target.closest && event.target.closest('.trim-range-input')) return;
+  let scrubWasPlaying = false;
+  const seekToClientX = (clientX) => {
     if (!(state.duration > 0)) return;
     const rect = trimScrubber.getBoundingClientRect();
     if (!rect.width) return;
-    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    pendingSeekValue = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    if (!seekRafHandle) {
+      seekRafHandle = requestAnimationFrame(applyPendingSeek);
+    }
+  };
+  trimScrubber.addEventListener('pointerdown', (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    // トリムのつまみ（range input の thumb）はそちらに任せる。
+    if (event.target && event.target.closest && event.target.closest('.trim-range-input')) return;
+    if (!state.file || !(state.duration > 0)) return;
+    seekDragging = true;
+    rangePlayActive = false;
+    scrubWasPlaying = !video.paused && !video.ended;
+    if (scrubWasPlaying) video.pause();
     try {
-      video.currentTime = ratio * state.duration;
-    } catch (error) { /* seek失敗は無視 */ }
+      trimScrubber.setPointerCapture(event.pointerId);
+    } catch (error) { /* capture 非対応は無視 */ }
+    seekToClientX(event.clientX);
+    event.preventDefault();
   });
+  trimScrubber.addEventListener('pointermove', (event) => {
+    if (!seekDragging) return;
+    seekToClientX(event.clientX);
+  });
+  const endScrub = (event) => {
+    if (!seekDragging) return;
+    seekDragging = false;
+    try {
+      trimScrubber.releasePointerCapture(event.pointerId);
+    } catch (error) { /* 未 capture は無視 */ }
+    if (scrubWasPlaying) {
+      scrubWasPlaying = false;
+      video.play().catch(() => {});
+    }
+  };
+  trimScrubber.addEventListener('pointerup', endScrub);
+  trimScrubber.addEventListener('pointercancel', endScrub);
 }
 
 if (playToggle) {
@@ -4295,22 +4292,6 @@ if (playRange) {
     video.play().catch(() => {
       rangePlayActive = false;
     });
-  });
-}
-
-if (seekBar) {
-  seekBar.addEventListener('input', () => {
-    // ドラッグ中はシーク先へ即時反映するが、rAF で間引く。
-    pendingSeekValue = Number(seekBar.value);
-    if (!seekRafHandle) {
-      seekRafHandle = requestAnimationFrame(applyPendingSeek);
-    }
-  });
-  seekBar.addEventListener('pointerdown', () => {
-    seekDragging = true;
-  });
-  window.addEventListener('pointerup', () => {
-    seekDragging = false;
   });
 }
 
