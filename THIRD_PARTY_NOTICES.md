@@ -42,6 +42,14 @@
 
 このため、本リポジトリは GPL 互換条件で配布する前提とし、プロジェクトライセンスを `GPL-2.0-or-later` としています。
 
+## 3-1. mediabunny（WebCodecs 書き出し用）
+
+- 名称: `mediabunny` 1.56.1（ESM 配布物を esbuild で IIFE 化）
+- 利用ファイル: `vendor/mediabunny/mediabunny.iife.js`（`window.Mediabunny` として読み込み）、`vendor/mediabunny/LICENSE`
+- ライセンス: MPL-2.0（同梱の `vendor/mediabunny/LICENSE` を参照）
+- 参照: https://github.com/Vanilagy/mediabunny
+- 再現手順: `tools/bundle-mediabunny.sh`
+
 ## 3. 主な上流プロジェクト
 
 実際のバイナリに含まれるコンポーネントの正確なライセンス条件は、各上流の配布物・ライセンス文書を参照してください。

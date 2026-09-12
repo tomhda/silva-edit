@@ -83,6 +83,25 @@
 
 ## 処理エンジン
 
+### 動画書き出し（高品質）: WebCodecs
+
+`高品質` の MP4 書き出しは、映像を WebCodecs の `VideoEncoder`（H.264、ハードウェアエンコーダ優先）で再エンコードします。デコード、Canvas でのクロップ・回転・反転・速度変更、エンコード、MP4 への格納を `webcodecs-export.js` が行い、コンテナの読み書きには mediabunny を使います。
+
+音声は、音量・チャンネル・速度のいずれも変更していない場合は AAC パケットをそのまま MP4 に格納します（AAC 以外の音声は WebCodecs の `AudioEncoder` で AAC に再エンコードします）。音声に手を入れる場合は音声だけ FFmpeg WASM で処理し、映像と `-c copy` で結合します。
+
+映像のビットレートは `幅 × 高さ × fps × 0.15` bps（1〜20 Mbps）です。実測（Chrome 153 / Windows 11 / AMD GPU、852x480 24fps 10 秒、ソースに対する SSIM）では、この設定で x264 `veryfast crf 23` と同等以上の画質になります（0.1 bpp では SSIM 0.972、x264 は 0.978、0.2 bpp では 0.986）。その代わりファイルは x264 より 1.5〜3 倍程度大きくなります。
+
+同じ環境での書き出し時間（音声あり、10 秒クリップ、0〜10 秒を等速で書き出し）:
+
+| 素材 | FFmpeg WASM（マルチスレッド版） | WebCodecs |
+|---|---|---|
+| 852x480 24fps | 3,308 ms | 877 ms |
+| 1920x1080 24fps | 14,235 ms | 2,060 ms |
+
+WebCodecs が使えない環境、H.264 エンコーダが無い環境、変換中に失敗した場合は、従来どおり FFmpeg WASM（libx264）で書き出します。`高速`（ストリームコピー）、音声抽出、フレーム保存、一括処理は FFmpeg WASM のままです。
+
+### FFmpeg WASM
+
 `manifest.json` で cross-origin isolation（`cross_origin_embedder_policy` / `cross_origin_opener_policy`）を有効にしているため `SharedArrayBuffer` が使え、マルチスレッド版の FFmpeg WASM で処理します。再エンコードを伴う書き出しは、シングルスレッド版と比べて実測で約 2.2 倍速くなります（8 秒 / 640x360 のクリップで 5,070ms → 2,269ms）。
 
 `SharedArrayBuffer` が使えない環境や、マルチスレッド版の読み込みに失敗した場合は、同梱のシングルスレッド版へ自動で切り替わります。
@@ -113,14 +132,20 @@
 - `panel.html`: UI レイアウト
 - `panel.css`: UI スタイル
 - `panel.js`: 編集ロジック（トリム/クロップ/変形/FFmpeg処理）
+- `webcodecs-export.js`: WebCodecs による動画書き出し（DOM 非依存）
 - `vendor/ffmpeg/`: FFmpeg WASM（シングルスレッド版・フォールバック用）
 - `vendor/ffmpeg-mt/`: FFmpeg WASM（マルチスレッド版・通常はこちらを使用）
+- `vendor/mediabunny/`: mediabunny（MP4/WebM の読み書き。`tools/bundle-mediabunny.sh` で IIFE 化）
+- `bench/`: WebCodecs と FFmpeg の書き出し比較ページ（開発用、拡張には含めない）
 - `images/`: アイコン類
 
 ## 開発メモ
 
 - バージョン更新時は `manifest.json` の `version` を更新
 - UI 変更時は `panel.html` と `panel.css` をセットで調整
+- 書き出し速度の比較は `node bench/serve.mjs` を起動し、Chrome で `http://localhost:8765/bench/` を開いて行う（COOP/COEP 付きで配信するのでマルチスレッド版 FFmpeg も動く）
+- 変換ロジックの純粋関数は `node bench/transform.test.mjs` でテストする
+- 反転は表示座標基準（回転してから左右/上下反転）。プレビュー（CSS / Canvas）、FFmpeg の `transpose` → `hflip`/`vflip`、WebCodecs の Canvas 描画、crop 矩形の追従（`flipCropRect`）をすべてこの順序に揃えている
 - 書き出しロジックの変更は `panel.js` の FFmpeg 引数を確認
 
 ## ライセンス

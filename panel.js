@@ -117,6 +117,8 @@ const ffmpegState = {
   cancelRequested: false,
   recentLogs: [],
   coreLabel: null,
+  // WebCodecs 書き出し中の AbortController。requestFfmpegCancel で abort する。
+  webcodecsAbort: null,
 };
 
 // Constants
@@ -229,6 +231,14 @@ function resetFfmpegInstance() {
 function requestFfmpegCancel() {
   if (!isProcessing()) return;
   ffmpegState.cancelRequested = true;
+  // WebCodecs 経路の変換も連動して中断する（AbortController → conversion.cancel()）。
+  if (ffmpegState.webcodecsAbort) {
+    try {
+      ffmpegState.webcodecsAbort.abort();
+    } catch (error) {
+      // abort の失敗は無視する（cancelRequested フラグで検出できる）。
+    }
+  }
   if (processingCancel) {
     processingCancel.disabled = true;
     processingCancel.textContent = '中断中...';
@@ -761,9 +771,11 @@ async function generateTrimThumbnails() {
       ctx.rect(i * cellW, 0, cellW, cellH);
       ctx.clip();
       ctx.translate(i * cellW + cellW / 2, cellH / 2);
-      ctx.rotate((state.transform.rotation * Math.PI) / 180);
+      // 反転は表示座標基準（ffmpeg の transpose→hflip/vflip、flipCropRect と同じ）。
+      // Canvas では scale を先に呼ぶと描画点には回転→反転の順で掛かる。
       if (state.transform.flipH) ctx.scale(-1, 1);
       if (state.transform.flipV) ctx.scale(1, -1);
+      ctx.rotate((state.transform.rotation * Math.PI) / 180);
       if (state.transform.rotation % 180 === 0) {
         ctx.drawImage(offscreen, -drawW / 2, -drawH / 2, drawW, drawH);
       } else {
@@ -1142,15 +1154,17 @@ function updateTransformUI() {
 
 function applyVideoTransform() {
   const { rotation, flipH, flipV } = state.transform;
+  // CSS の transform は右側の関数から要素に掛かる。反転を表示座標基準にするため
+  // （ffmpeg の transpose→hflip/vflip、flipCropRect と同じ）反転を左＝外側に置く。
   const transforms = [];
-  if (rotation) {
-    transforms.push(`rotate(${rotation}deg)`);
-  }
   if (flipH) {
     transforms.push('scaleX(-1)');
   }
   if (flipV) {
     transforms.push('scaleY(-1)');
+  }
+  if (rotation) {
+    transforms.push(`rotate(${rotation}deg)`);
   }
   video.style.transform = transforms.length ? transforms.join(' ') : 'none';
 }
@@ -1253,11 +1267,13 @@ function drawTransformedSource(ctx, source, sourceW, sourceH, displayW, displayH
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.translate(displayW / 2, displayH / 2);
-  const rad = (state.transform.rotation * Math.PI) / 180;
-  ctx.rotate(rad);
+  // 反転は表示座標基準（ffmpeg の transpose→hflip/vflip、flipCropRect と同じ）。
+  // scale を先に呼ぶと描画点には回転→反転の順で掛かる。
   const scaleX = state.transform.flipH ? -1 : 1;
   const scaleY = state.transform.flipV ? -1 : 1;
   ctx.scale(scaleX, scaleY);
+  const rad = (state.transform.rotation * Math.PI) / 180;
+  ctx.rotate(rad);
   ctx.drawImage(source, -sourceW / 2, -sourceH / 2, sourceW, sourceH);
   ctx.restore();
   return true;
@@ -2012,9 +2028,403 @@ async function runFfmpegCommand({
 }
 
 
+// WebCodecs 高速書き出し（映像: mediabunny/WebCodecs、音声+mux: 既存 ffmpeg）。
+// 失敗時は呼び出し側が従来の ffmpeg 経路へフォールバックする。
+// crop は getCropFilter と同じ「回転・反転後の表示座標系」の数値矩形。null で全面。
+function getNumericCrop() {
+  const { width: videoW, height: videoH } = getDisplaySize();
+  if (!videoW || !videoH || !state.crop.width || !state.crop.height) {
+    return null;
+  }
+  const crop = clampCropRect(state.crop);
+  if (crop.x === 0 && crop.y === 0 && crop.width === videoW && crop.height === videoH) {
+    return null;
+  }
+  return {
+    x: Math.round(crop.x),
+    y: Math.round(crop.y),
+    width: Math.max(1, Math.round(crop.width)),
+    height: Math.max(1, Math.round(crop.height)),
+  };
+}
+
+function trackWebCodecsAbort(controller) {
+  ffmpegState.webcodecsAbort = controller;
+}
+
+function untrackWebCodecsAbort(controller) {
+  if (ffmpegState.webcodecsAbort === controller) {
+    ffmpegState.webcodecsAbort = null;
+  }
+}
+
+function throwWebCodecsCancelIfAborted(signal) {
+  if ((signal && signal.aborted) || ffmpegState.cancelRequested) {
+    throw new FfmpegCancelError();
+  }
+}
+
+// 映像 mp4 Blob と音声 m4a Blob を再エンコード無しで結合する。
+// 既存の直列化 mutex（ffmpegQueue）を使うため並列実行の意味は壊さない。
+async function muxWebCodecsVideoAudio({ videoBlob, audioBlob, onProgress } = {}) {
+  if (!videoBlob || !videoBlob.size) {
+    throw new Error('結合する映像がありません。');
+  }
+  if (!audioBlob || !audioBlob.size) {
+    return videoBlob;
+  }
+  return ffmpegQueue.run(async () => {
+    const ffmpeg = await ensureFfmpeg();
+    const videoName = 'wc-video.mp4';
+    const audioName = 'wc-audio.m4a';
+    const outputName = 'wc-muxed.mp4';
+    try {
+      throwIfFfmpegCanceled();
+      await safeDelete(ffmpeg, videoName);
+      await safeDelete(ffmpeg, audioName);
+      await safeDelete(ffmpeg, outputName);
+      const [videoBuffer, audioBuffer] = await Promise.all([
+        videoBlob.arrayBuffer(),
+        audioBlob.arrayBuffer(),
+      ]);
+      throwIfFfmpegCanceled();
+      await ffmpeg.writeFile(videoName, new Uint8Array(videoBuffer));
+      await ffmpeg.writeFile(audioName, new Uint8Array(audioBuffer));
+      throwIfFfmpegCanceled();
+      await execFfmpegWithProgress(
+        ffmpeg,
+        [
+          '-i', videoName,
+          '-i', audioName,
+          '-map', '0:v:0',
+          '-map', '1:a:0?',
+          '-c', 'copy',
+          '-movflags', '+faststart',
+          outputName,
+        ],
+        onProgress
+      );
+      const data = await ffmpeg.readFile(outputName);
+      const muxed = toBlob(data, 'video/mp4');
+      if (!muxed.size) {
+        throw new Error('出力が空になりました。');
+      }
+      return muxed;
+    } finally {
+      await safeDelete(ffmpeg, videoName);
+      await safeDelete(ffmpeg, audioName);
+      await safeDelete(ffmpeg, outputName);
+    }
+  });
+}
+
+// 音声だけを既存フィルタ（buildAudioFilters: atempo・音量・チャンネル）のまま
+// m4a（AAC）で切り出す。映像は WebCodecs 側が担当する。
+async function exportWebCodecsAudioOnly({ start, duration, speed, onProgress } = {}) {
+  const audioFilters = buildAudioFilters({ speed });
+  const args = [
+    '-ss', `${start}`,
+    '-t', `${duration}`,
+    '-i', getInputName(),
+    '-map', '0:a:0?',
+    '-vn',
+  ];
+  if (audioFilters.length) {
+    args.push('-af', audioFilters.join(','));
+  }
+  args.push('-c:a', 'aac', '-b:a', '128k', 'wc-audio.m4a');
+  return runFfmpegCommand({
+    args,
+    outputName: 'wc-audio.m4a',
+    outputType: 'audio/mp4',
+    onProgress,
+  });
+}
+
+// 単体の編集動画書き出しの WebCodecs 経路。
+// 音声に手を入れる必要がなければ（buildAudioFilters が空なら）mediabunny 内で
+// 音声まで処理し ffmpeg を一切使わない。手を入れる場合と、音声を取り込めな
+// かった場合は従来どおり ffmpeg で音声 → mux する。
+// 進捗: ffmpeg を使わない経路は映像 0〜0.98・finalize 0.98〜1.0、
+// 使う経路は音声 0〜0.1・映像 0.1〜0.95・mux 0.95〜1.0。
+async function exportVideoWithWebCodecs({ start, end, onProgress } = {}) {
+  const api = self.SilvaWebCodecs;
+  if (!api) {
+    throw new Error('WebCodecs モジュールが読み込まれていません。');
+  }
+  if (!(await api.isSupported())) {
+    throw new Error('この環境では WebCodecs 書き出しを利用できません。');
+  }
+  const duration = Math.max(0.1, end - start);
+  const speed = getPlaybackRate();
+  const crop = getNumericCrop();
+  const { rotation, flipH, flipV } = state.transform;
+  const controller = new AbortController();
+  trackWebCodecsAbort(controller);
+  try {
+    throwWebCodecsCancelIfAborted(controller.signal);
+    // 音声の有無は mediabunny の Input で判定する。判定自体に失敗したら
+    // 「音声あり」とみなして試す（無ければ ffmpeg 側が失敗し、全体が
+    // ffmpeg 経路へフォールバックする。無音欠落より安全側に倒す）。
+    let needAudio = true;
+    try {
+      needAudio = await api.hasAudio(state.file);
+    } catch (error) {
+      needAudio = true;
+    }
+    throwWebCodecsCancelIfAborted(controller.signal);
+    // speed≠1 なら atempo が入るので、この 1 つで「音声に手を入れるか」が分かる。
+    const audioFilters = buildAudioFilters({ speed });
+    const runVideo = async (audioOpt, base, span) => {
+      try {
+        return await api.exportVideo({
+          file: state.file,
+          start,
+          end,
+          crop,
+          rotation,
+          flipH,
+          flipV,
+          speed,
+          audio: audioOpt,
+          signal: controller.signal,
+          onProgress: (progress) => {
+            if (onProgress) onProgress(base + progress * span);
+          },
+        });
+      } catch (error) {
+        // キャンセルは既存と同じ FfmpegCancelError として扱う。
+        if (controller.signal.aborted || (api.isCancelError && api.isCancelError(error))) {
+          throw new FfmpegCancelError();
+        }
+        throw error;
+      }
+    };
+    const logAndDownload = (finalBlob, videoResult, audioNote) => {
+      rememberFfmpegLog(
+        `WebCodecs 経路で書き出し (${videoResult.width}x${videoResult.height} ${videoResult.codec}/${videoResult.hardwareAcceleration} 映像${Math.round(videoResult.blob.size / 1024)}KB ${audioNote} audioMode:${videoResult.audioMode})`
+      );
+      const clip = formatClipLabel(start, end);
+      downloadBlob(finalBlob, `${baseName()}-${clip}.mp4`);
+    };
+    if (audioFilters.length === 0) {
+      const videoResult = await runVideo('auto', 0, 0.98);
+      throwWebCodecsCancelIfAborted(controller.signal);
+      if (videoResult.audioIncluded || !needAudio) {
+        // ffmpeg を一切使わない（ensureFfmpeg も呼ばない）。
+        if (onProgress) onProgress(1);
+        logAndDownload(
+          videoResult.blob,
+          videoResult,
+          videoResult.audioIncluded ? '音声あり' : '音声なし'
+        );
+        return;
+      }
+      // 音声トラックはあるが取り込めなかった。映像は使い回し、音声と mux だけ ffmpeg で行う。
+      const audioBlob = await exportWebCodecsAudioOnly({
+        start,
+        duration,
+        speed,
+        onProgress: (progress) => {
+          if (onProgress) onProgress(0.98 + progress * 0.01);
+        },
+      });
+      throwWebCodecsCancelIfAborted(controller.signal);
+      const finalBlob = await muxWebCodecsVideoAudio({
+        videoBlob: videoResult.blob,
+        audioBlob,
+        onProgress: (progress) => {
+          if (onProgress) onProgress(0.99 + progress * 0.01);
+        },
+      });
+      if (onProgress) onProgress(1);
+      logAndDownload(finalBlob, videoResult, `音声あり(ffmpeg:${Math.round(audioBlob.size / 1024)}KB)`);
+      return;
+    }
+    // 音声に手を入れる場合: 従来どおり audio:'none' + ffmpeg 音声 + mux。
+    let audioBlob = null;
+    if (needAudio) {
+      audioBlob = await exportWebCodecsAudioOnly({
+        start,
+        duration,
+        speed,
+        onProgress: (progress) => {
+          if (onProgress) onProgress(progress * 0.1);
+        },
+      });
+    }
+    throwWebCodecsCancelIfAborted(controller.signal);
+    const videoResult = await runVideo('none', 0.1, 0.85);
+    throwWebCodecsCancelIfAborted(controller.signal);
+    const finalBlob = await muxWebCodecsVideoAudio({
+      videoBlob: videoResult.blob,
+      audioBlob,
+      onProgress: (progress) => {
+        if (onProgress) onProgress(0.95 + progress * 0.05);
+      },
+    });
+    if (onProgress) onProgress(1);
+    logAndDownload(
+      finalBlob,
+      videoResult,
+      audioBlob ? `音声あり(ffmpeg:${Math.round(audioBlob.size / 1024)}KB)` : '音声なし'
+    );
+  } finally {
+    untrackWebCodecsAbort(controller);
+  }
+}
+
+// 一括用の音声のみ m4a アイテム（buildClipAudioVariants の m4a 版）。
+function buildClipAudioM4AItem(clip, index, speed) {
+  const audioFilters = buildAudioFilters({ speed });
+  const inputName = getInputName();
+  const outputName = `clip-audio-${index}.m4a`;
+  const baseArgs = [
+    '-ss', `${clip.start}`,
+    '-t', `${clip.duration}`,
+    '-i', inputName,
+    '-map', '0:a:0?',
+    '-vn',
+  ];
+  if (audioFilters.length) baseArgs.push('-af', audioFilters.join(','));
+  return {
+    variants: [{ args: baseArgs.concat(['-c:a', 'aac', '-b:a', '128k', outputName]) }],
+    outputName,
+    outputType: 'audio/mp4',
+  };
+}
+
+// 一括分割（mp4）の WebCodecs 経路。音声フィルタ不要なら音声 batch を実行せず
+// 各クリップを audio:'auto' で処理する（ffmpeg を一切使わない）。手を入れる場合
+// は音声を既存 batch で一括処理し（入力書き込み1回を維持）、映像+mux を順次処理する。
+// 途中で失敗したら例外を投げ、呼び出し側が ffmpeg 一括へフォールバックする。
+async function runBulkExportWebCodecsMp4(clips, { dirHandle } = {}) {
+  const api = self.SilvaWebCodecs;
+  if (!api) {
+    throw new Error('WebCodecs モジュールが読み込まれていません。');
+  }
+  if (!(await api.isSupported())) {
+    throw new Error('この環境では WebCodecs 書き出しを利用できません。');
+  }
+  const total = clips.length;
+  const speed = getPlaybackRate();
+  const crop = getNumericCrop();
+  const { rotation, flipH, flipV } = state.transform;
+  const controller = new AbortController();
+  trackWebCodecsAbort(controller);
+  try {
+    let needAudio = true;
+    try {
+      needAudio = await api.hasAudio(state.file);
+    } catch (error) {
+      needAudio = true;
+    }
+    throwWebCodecsCancelIfAborted(controller.signal);
+    // 単体と同じ判定。フィルタ無しなら音声 batch を実行しない。
+    const audioFilters = buildAudioFilters({ speed });
+    const muxInWebCodecs = audioFilters.length === 0;
+    const audioBlobs = new Array(total).fill(null);
+    if (needAudio && !muxInWebCodecs) {
+      const audioItems = clips.map((clip, index) => buildClipAudioM4AItem(clip, index, speed));
+      await runFfmpegBatch(audioItems, {
+        onItemStart: (_item, i) => {
+          setProgress({ done: 0, total, label: '一括書き出し中（音声）', itemProgress: (i / total) * 0.3 });
+        },
+        onItemProgress: (_item, progress, i) => {
+          setProgress({ done: 0, total, label: '一括書き出し中（音声）', itemProgress: ((i + progress) / total) * 0.3 });
+        },
+        onItemDone: async (_item, blob, i) => {
+          audioBlobs[i] = blob;
+        },
+      });
+    }
+    for (let i = 0; i < total; i++) {
+      throwWebCodecsCancelIfAborted(controller.signal);
+      const clip = clips[i];
+      const videoBase = muxInWebCodecs ? 0 : 0.3;
+      setProgress({ done: i, total, label: '一括書き出し中', itemProgress: videoBase });
+      let videoResult;
+      try {
+        videoResult = await api.exportVideo({
+          file: state.file,
+          start: clip.start,
+          end: clip.end,
+          crop,
+          rotation,
+          flipH,
+          flipV,
+          speed,
+          audio: muxInWebCodecs ? 'auto' : 'none',
+          signal: controller.signal,
+          onProgress: (progress) => {
+            setProgress({ done: i, total, label: '一括書き出し中', itemProgress: videoBase + progress * 0.6 });
+          },
+        });
+      } catch (error) {
+        if (controller.signal.aborted || (api.isCancelError && api.isCancelError(error))) {
+          throw new FfmpegCancelError();
+        }
+        throw error;
+      }
+      throwWebCodecsCancelIfAborted(controller.signal);
+      let finalBlob;
+      if (videoResult.audioIncluded || !needAudio) {
+        // ffmpeg を使わない（audio:'auto' で取り込み済みか、音声なし）。
+        rememberFfmpegLog(
+          `WebCodecs 一括 ${clip.label} (${videoResult.width}x${videoResult.height} audioMode:${videoResult.audioMode})`
+        );
+        finalBlob = videoResult.blob;
+      } else if (muxInWebCodecs) {
+        // auto で取り込めなかった稀な場合: このクリップだけ ffmpeg で音声+mux。
+        const clipAudioBlob = await exportWebCodecsAudioOnly({
+          start: clip.start,
+          duration: clip.duration,
+          speed,
+          onProgress: (progress) => {
+            setProgress({ done: i, total, label: '一括書き出し中', itemProgress: 0.9 + progress * 0.05 });
+          },
+        });
+        throwWebCodecsCancelIfAborted(controller.signal);
+        finalBlob = await muxWebCodecsVideoAudio({
+          videoBlob: videoResult.blob,
+          audioBlob: clipAudioBlob,
+          onProgress: (progress) => {
+            setProgress({ done: i, total, label: '一括書き出し中', itemProgress: 0.95 + progress * 0.05 });
+          },
+        });
+      } else {
+        finalBlob = await muxWebCodecsVideoAudio({
+          videoBlob: videoResult.blob,
+          audioBlob: audioBlobs[i],
+          onProgress: (progress) => {
+            setProgress({ done: i, total, label: '一括書き出し中', itemProgress: 0.9 + progress * 0.1 });
+          },
+        });
+      }
+      const filename = `${baseName()}-${clip.label}.mp4`;
+      await writeBlobToDirOrDownload(dirHandle, filename, finalBlob);
+      setProgress({ done: i + 1, total, label: '一括書き出し中' });
+    }
+  } finally {
+    untrackWebCodecsAbort(controller);
+  }
+}
+
 // Export actions
 async function exportVideoWithFfmpeg({ onProgress } = {}) {
   const { start, end } = sanitizeTimes();
+  // 再エンコードが必要なときだけ WebCodecs 経路を試す（高速=c copy は現行のまま）。
+  if (!isStreamCopyRequested()) {
+    try {
+      await exportVideoWithWebCodecs({ start, end, onProgress });
+      return;
+    } catch (error) {
+      if (isFfmpegCancelError(error)) {
+        throw error;
+      }
+      rememberFfmpegLog(`WebCodecs 経路に失敗、ffmpeg へフォールバック: ${error?.message || error}`);
+    }
+  }
   const duration = Math.max(0.1, end - start);
   const cropFilter = getCropFilter();
   const speed = getPlaybackRate();
@@ -3133,6 +3543,19 @@ async function runBulkExport(kind, dirHandle) {
       });
       setStatus(`${clips.length} 枚のフレームを書き出しました。`);
       return;
+    }
+    // mp4 の一括は WebCodecs 経路を試す（再エンコードが必要なときのみ）。
+    if (kind !== 'mp3' && !isStreamCopyRequested()) {
+      try {
+        await runBulkExportWebCodecsMp4(clips, { dirHandle });
+        setStatus(`${clips.length} 個のファイルを書き出しました。`);
+        return;
+      } catch (error) {
+        if (isFfmpegCancelError(error)) {
+          throw error;
+        }
+        rememberFfmpegLog(`WebCodecs 一括経路に失敗、ffmpeg へフォールバック: ${error?.message || error}`);
+      }
     }
     const items = [];
     for (const c of clips) {
