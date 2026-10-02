@@ -3,6 +3,8 @@
 動画・音声ファイルを Chrome のサイドパネルで手早く編集できる拡張機能です。  
 トリミング、クロップ、回転/反転、再生速度変更、音声抽出、フレーム保存に対応しています。
 
+**[Chrome ウェブストアからインストール](https://chromewebstore.google.com/detail/silva-edit/jhoopmdknkooacpocbapgmmmgladkfbc)**
+
 ## 主な機能
 
 - 長さトリミング（iOS風シークバー / 数値入力 双方向同期）
@@ -78,10 +80,6 @@
 3. `音を両耳にする` は枠内に複数ファイルをドラッグ&ドロップ、またはクリックで選び、元にする音（左 or 右）を選んで `一括保存`
 4. `まとめて画像保存` は FFmpeg を使わず、動画を1本ずつ読み込んで PNG 化します
 5. `音を両耳にする` は FFmpeg WASM で1ファイルずつ処理し、動画は MP4、音声は MP3 として保存します
-
-## Chrome Web Store
-
-- https://chromewebstore.google.com/detail/jhoopmdknkooacpocbapgmmmgladkfbc
 
 ## 処理エンジン
 
